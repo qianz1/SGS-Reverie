@@ -2662,7 +2662,7 @@
       if (pd.mode === 'respond') {
         hint = respondHint(pd.player, pd.respondNeed, pd.respondReason, pd.selected);
       } else if (pd.mode === 'brink') {
-        hint = '你已濒死！点选一张【桃】/【酒】再确认，或点技能按钮发动转化，或放弃。';
+        hint = '你已濒死！点选真【桃】/【酒】，或点技能按钮用手牌/装备区的「牌」转化当【桃】。';
       } else if (pd.mode === 'wuxie') {
         // 取消技能选牌后恢复外层那条明确的无懈链提示，不退回笼统文案
         hint = pd.hintText ||
@@ -2919,7 +2919,7 @@
         const chosen = saves.find((c) => c.id === pd.selected);
         this.setHint(chosen
           ? '已选【' + chosen.name + '】，点上方操作区的【使用】确认自救。'
-          : '你已濒死！点选一张【桃】/【酒】再确认，或点技能按钮发动转化，或放弃。');
+          : '你已濒死！点选真【桃】/【酒】，或点技能按钮用手牌/装备区的「牌」转化当【桃】。');
         this.render(pd.game);
         this.refreshActions();
 
@@ -3512,17 +3512,19 @@
     }
 
     /**
-     * 濒死：saves 是手里所有可用的【桃】/【酒】。
-     * 返回其中一张（game.brink 会循环调用直到体力回到 1 点以上），或 null 放弃。
-     * 【酒】在此处次数不限，与出牌阶段的「每回合限一次」互不影响。
+     * 濒死：saves 是手里所有可用的真【桃】/【酒】；技能描述写「牌」的
+     * 转化（如【龙魂】♥ 当【桃】）由右下技能按钮独立进入，素材可以是
+     * 手牌或装备区。返回其中一张（game.brink 会循环调用直到体力回到
+     * 1 点以上），或 null 放弃。【酒】在此处次数不限。
      */
     waitBrink(player, saves, game) {
       const list = Array.isArray(saves) ? saves : (saves ? [saves] : []);
       return new Promise((resolve) => {
         // ★ selected 记录玩家点选的那一张【桃】/【酒】；确认前不自动使用。
         this.pending = { mode: 'brink', player, game, resolve, saves: list, selected: null };
-        this.setHint('你已濒死！点选手牌里的【桃】或【酒】（每张回复 1 点体力），' +
-          '再点上方操作区的【使用】确认，或放弃。');
+        this.setHint('你已濒死！可点选手牌里的【桃】/【酒】；' +
+          '也可点右下技能按钮，用手牌或装备区的「牌」转化当【桃】' +
+          '（每张回复 1 点体力），再点上方操作区确认，或放弃。');
         this.refreshActions();
         this.render(game);
       });

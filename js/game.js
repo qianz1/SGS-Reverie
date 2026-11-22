@@ -1416,7 +1416,10 @@
       if (this.over || !SGS.Equipment || !SGS.Equipment.hasQinglong(attacker)) return false;
       // 目标可能已死 / 距离变化，仍需按与正常出杀一致的规则校验
       if (!this.listTargets(attacker, { type: 'sha' }, 'sha').includes(target)) return false;
-      const candidates = attacker.hand.filter((c) =>
+      // ★「牌」= 手牌 + 装备区：渐营 / 龙魂这类写「牌」的转化，
+      //   素材可以只剩装备区一张，也要能进入青龙追加杀的询问。
+      const pool = this.conversionCardPool(attacker);
+      const candidates = pool.filter((c) =>
         attacker.canUseAsSha(c) ||
         !!this.shaConversionFor(attacker, c) ||
         !!this.basicConversionFor(attacker, c));
@@ -1435,14 +1438,14 @@
       let conv = this.shaConversionFor(attacker, follow) ||
         this.basicConversionFor(attacker, follow);
       if (attacker.isHuman && this.ui && typeof this.ui.waitPick === 'function') {
-        const canConvert = attacker.hand.some(
+        const canConvert = pool.some(
           (c) => !attacker.canUseAsSha(c) &&
             (!!this.shaConversionFor(attacker, c) ||
              !!this.basicConversionFor(attacker, c)));
         // ★ 右下会把该角色的全部技能都列出来；这里点出此刻真正能发动的几个
         const activeNames = [];
         const add = (n) => { if (n && activeNames.indexOf(n) < 0) activeNames.push(n); };
-        attacker.hand.forEach((c) => {
+        pool.forEach((c) => {
           const cv = this.shaConversionFor(attacker, c) ||
             this.basicConversionFor(attacker, c);
           if (cv && !attacker.canUseAsSha(c)) add(cv.skill || SGS.skillNameFor(attacker, 'play'));
@@ -1470,10 +1473,10 @@
           // ★ 按 conversion.to 复核：渐营 to='basic' 用 canUseAsType(c,'basic')，
           //   龙魂 / 龙胆 to='sha' 用 canUseAsType(c,'sha')。
           const c = pick.card, cv = pick.conversion;
+          const entry = this.conversionCardEntry(attacker, c.id);
           if (!cv || !SGS.Cards.matchesFrom(c, cv.from) ||
-              !attacker.hand.some((x) => x.id === c.id) ||
-              !attacker.canUseAsType(c, cv.to)) return false;
-          follow = c;
+              !entry || !attacker.canUseAsType(c, cv.to)) return false;
+          follow = entry.card || c;
           conv = cv;
         } else {
           // 普通选牌路径：回传牌 id（字符串），保持旧调用契约
@@ -1828,6 +1831,30 @@
      * 龙胆等「可以」类技能由 ui.js 的技能按钮按 need 过滤转化方向。
      */
     /**
+     * ★ 技能描述里写「牌」时的统一素材范围：手牌 + 装备区（不含判定区）。
+     *   之前 brink / 无懈 / 青龙追加杀等分支仍按 hand.some 判断，导致
+     *   「手牌用完了但装备区还有一张 ♥ 牌可当【桃】」时提前判死 / 拒绝转化。
+     *   这里集中收口，所有转化校验都走同一处，避免再漏。
+     */
+    conversionCardPool(player) {
+      if (!player) return [];
+      if (SGS.Zones && typeof SGS.Zones.conversionCards === 'function') {
+        return SGS.Zones.conversionCards(player).map((e) => e.card);
+      }
+      return (player.hand || []).slice();
+    }
+
+    /** 按 id 找一张「牌」（手牌 / 装备区），返回 SGS.Zones 条目 */
+    conversionCardEntry(player, id) {
+      if (!player) return null;
+      if (SGS.Zones && typeof SGS.Zones.findConversionCard === 'function') {
+        return SGS.Zones.findConversionCard(player, id);
+      }
+      const c = (player.hand || []).find((x) => String(x.id) === String(id));
+      return c ? { id: c.id, card: c, zone: 'hand', zoneKey: 'hand' } : null;
+    }
+
+    /**
      * ──【无懈可击】响应链 ──────────────────────────────────
      * 一次锦囊结算共用一个 ctx：negated 记录被抵消的「目标效果」，
      * optOut 记录选择「本轮不使用无懈可击」的玩家（整张牌结算期间都不再问）。
@@ -1904,7 +1931,10 @@
         if (meta.lastWuXie && p === meta.lastWuXie) continue;
         // ★【龙魂】♠ 当【无懈可击】：手里没有真无懈但有可转化的 ♠ 牌时，
         //   同样要进入询问（玩家点技能按钮 / AI 自动选转化牌）。
-        if (!p.hand || !p.hand.some((c) =>
+        // ★「牌」= 手牌 + 装备区：装备区里的 ♠ / 黑牌也可经【龙魂】/
+        //   【看破】当【无懈可击】，不能因为手里没有牌就整轮跳过。
+        const pool = this.conversionCardPool(p);
+        if (!pool.some((c) =>
           c.type === 'wuxiekeji' ||
           (typeof p.canUseAsType === 'function' && p.canUseAsType(c, 'wuxiekeji')))) continue;
         const used = await this.askWuXieOnce(ctx, p, target, againstPlayer, meta);
@@ -1954,11 +1984,17 @@
         // ★ 按场景取真实发动的技能名：卧龙诸葛是【看破】，不是主技能【火计】
         skillName = SGS.skillNameFor(player, 'wuxie') || player.skill.name;
       } else {
-        card = (typeof choice === 'object') ? choice
-          : player.hand.find((c) => c.id === choice);
+        // 真【无懈可击】理论上只在手牌，但仍用统一「牌」范围兜底，
+        // 避免未来装备区放响应牌时被误拒。
+        const rawId = (typeof choice === 'object') ? choice.id : choice;
+        const entry = this.conversionCardEntry(player, rawId);
+        card = entry ? entry.card : (typeof choice === 'object' ? choice : null);
         if (!card || card.type !== 'wuxiekeji') return null;
       }
-      if (!player.hand.some((c) => c.id === card.id)) return null;
+      // ★ 最终复核同样按「牌」范围，转化素材可以来自装备区。
+      const still = this.conversionCardEntry(player, card.id);
+      if (!still) return null;
+      card = still.card || card;
       return {
         player: player, card: card,
         asName: asName, skillName: skillName
@@ -2280,7 +2316,8 @@
     }
 
     /**
-     * 濒死：可连续使用手里的【桃】/【酒】自救，每张回复 1 点体力，
+     * 濒死：可连续使用手里的真【桃】/【酒】自救；技能描述写「牌」的
+     * 转化（【龙魂】♥ 当【桃】）同样可用装备区素材，每张回复 1 点体力，
      * 直到体力回到 1 点以上、没有自救牌、或玩家放弃。
      * 【酒】在濒死时**次数不限**（不受出牌阶段「每回合限一次」约束），
      * 且只作回复用，不置 jiuBuff 伤害加成。
@@ -2302,10 +2339,15 @@
       let guard = 0;
       while (target.hp <= 0 && guard++ < 16) {
         const saves = target.hand.filter((c) => c.type === 'tao' || c.type === 'jiu');
-        // 没有真桃 / 酒时，若还有可当【桃】的转化牌（♥），仍要给玩家
-        // 一次自救机会：技能按钮由 ui.refreshActions() 从手牌里自行判断。
-        const canConvert = target.hand.some(
-          (c) => c.type !== 'tao' && target.canUseAsType(c, 'tao')
+        // ★ 没有真桃 / 酒时，若还有可当【桃】的转化牌（♥）仍要给一次
+        //   自救机会。★「牌」包括手牌 + 装备区：神赵云 1 血中闪电时，
+        //   手牌 ♥ 用完后装备区还有 ♥，旧版只扫 target.hand 就提前 break，
+        //   直接判死；这正是本次修复的 bug。
+        const conversionPool = this.conversionCardPool(target);
+        const canConvert = conversionPool.some(
+          (c) => c.type !== 'tao' &&
+            typeof target.canUseAsType === 'function' &&
+            target.canUseAsType(c, 'tao')
         );
         if (!saves.length && !canConvert) break;
 
@@ -2328,16 +2370,15 @@
               (conv.scenes || []).indexOf('brink') < 0 ||
               !SGS.Cards.matchesFrom(card, conv.from) ||
               !target.canUseAsType(card, 'tao') ||
-              !target.hand.some((c) => c.id === card.id)) break;
+              !this.conversionCardEntry(target, card.id)) break;
           asName = '桃';
           skillName = SGS.skillNameFor(target, 'brink') || target.skill.name;
         } else if (card.type !== 'tao' && card.type !== 'jiu') {
           break; // 放弃 / 脏数据
         }
-        const stillThere = (SGS.Zones && SGS.Zones.findConversionCard)
-          ? SGS.Zones.findConversionCard(target, card.id)
-          : target.hand.some((c) => c.id === card.id);
+        const stillThere = this.conversionCardEntry(target, card.id);
         if (!stillThere) break;
+        card = stillThere.card || card;
 
         // 濒死使用【酒】自救播酒音；转化当【桃】统一按 tao 处理（无素材，静默）
         this.playCardVoice(target, card, asName ? 'tao' : card.type);

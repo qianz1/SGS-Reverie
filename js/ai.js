@@ -19,16 +19,20 @@
 
     /**
      * 【龙魂】这类「按花色 / 场景」的主动转化：找到第一个符合 scenes + to
-     * 的转化项，再挑一张能转化的手牌。找不到返回 null。
+     * 的转化项，再从「牌」范围（手牌 + 装备区，不含判定区）挑一张可转化素材。
      * AI 不需要点技能按钮，但走的仍是 Player.canUseAsType() 的同一套复核，
-     * 因此不会绕过技能把普通牌乱转化。
+     * 因此不会绕过技能把普通牌乱转化；装备区素材离场由 Game.discardConsumed()
+     * 统一处理。
      */
     pickConverted(player, scenes, to) {
       const conv = (player.skill && player.skill.conversions || []).find(
         (c) => (c.scenes || []).indexOf(scenes) >= 0 && c.to === to
       );
       if (!conv || typeof player.canUseAsType !== 'function') return null;
-      const card = (player.hand || []).find(
+      const pool = (SGS.Zones && typeof SGS.Zones.conversionCards === 'function')
+        ? SGS.Zones.conversionCards(player).map((e) => e.card)
+        : (player.hand || []).slice();
+      const card = pool.find(
         (c) => SGS.Cards.matchesFrom(c, conv.from) && player.canUseAsType(c, to)
       );
       return card ? { card: card, conversion: conv } : null;
