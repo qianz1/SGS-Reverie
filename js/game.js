@@ -1848,16 +1848,23 @@
       const perTargetTrick = type === 'wanjian' || type === 'nanman' ||
         type === 'taoyuan' || type === 'wugufengdeng';
       const selfAskAllowed = delayed || perTargetTrick;
-      // ★ 五谷丰登 / 桃园结义：仅当「当前结算目标就是使用者自己」时，
-      //   整条无懈链都不询问；其他目标（含使用者无懈别人）照常逐个询问。
-      const skipSelfTarget = !delayed &&
+      // ★ 五谷丰登 / 桃园结义：这两张牌对【当前结算目标】是纯收益
+      //   （选牌 / 回血），受益者没理由主动无懈自己，所以第一轮询问圈里
+      //   跳过【当前目标本人】；但整条链照常跑，其他所有角色（含使用者）
+      //   仍可无懈该目标的效果 —— 这正是「对方开五谷、对方先选牌时也要
+      //   问我是否无懈」的关键，旧版把整条链直接跳过，顺序就反了。
+      //   别人打出无懈后，目标本人仍可参与反无懈（只在第一轮跳过）。
+      //   ★ 南蛮 / 万箭对目标有害，不跳过目标自己：别人开的 AOE 结算到
+      //     我头上时我也要被问；自己开的 AOE 本来结算不到我，其余每个
+      //     目标结算时都照常问我。
+      const skipBeneficiary = !delayed &&
         (type === 'wugufengdeng' || type === 'taoyuan');
       return {
         card: card, user: user,
         // 目标数 >= 2 的锦囊才会多次询问，才提供「本轮不使用」快捷按钮。
         multiTarget: (targetCount || 0) >= 2,
         selfAskAllowed: selfAskAllowed,
-        skipSelfTarget: skipSelfTarget,
+        skipBeneficiary: skipBeneficiary,
         negated: new Set(), optOut: new Set()
       };
     }
@@ -1888,6 +1895,10 @@
         //   （万箭齐发 / 南蛮入侵 / 延时锦囊例外，依旧询问）。
         //   只在第一轮跳过；B 打出无懈后 A 仍可反无懈（见需求 2）。
         if (meta.skipUser && p === ctx.user) continue;
+        // ★ 五谷 / 桃园：第一轮跳过「当前结算目标本人」（对自己有利，
+        //   不会主动无懈自己的收益）；整条链不跳过，其他角色照常可无懈。
+        //   别人打出无懈后目标本人仍能反无懈（skipBeneficiary 只在第一轮）。
+        if (meta.skipBeneficiary && p === target) continue;
         // ★ 无懈打无懈：刚打出上一张【无懈可击】的人本轮不再被问，
         //   否则会出现「自己抵消自己刚打出的无懈」。
         if (meta.lastWuXie && p === meta.lastWuXie) continue;
@@ -1961,9 +1972,6 @@
      */
     async askWuXie(ctx, target, startPlayer) {
       if (!ctx || !target || ctx.negated.has(target)) return true;
-      // ★ 五谷丰登 / 桃园结义：目标就是使用者自己时，整条无懈链都不询问，
-      //   直接让效果生效（其他目标角色仍逐个询问）。
-      if (ctx.skipSelfTarget && target === ctx.user) return false;
       let negated = false;
       let start = startPlayer || ctx.user;
       let lastWuXie = null;   // 上一张【无懈可击】的使用者（null = 第一轮）
@@ -1972,6 +1980,10 @@
         const meta = {
           // 只对「第一张无懈」跳过使用者本人；B 用无懈后 A 仍可被问反无懈。
           skipUser: lastWuXie === null && !ctx.selfAskAllowed,
+          // ★ 五谷 / 桃园：只在第一轮跳过「当前结算目标本人」，整条链照跑。
+          //   对方开五谷、对方先选牌时，我仍会被问是否无懈他；轮到我选牌时
+          //   我不被问（对自己有利）。别人无懈我的收益后，我仍可反无懈。
+          skipBeneficiary: lastWuXie === null && !!ctx.skipBeneficiary,
           lastWuXie: lastWuXie,
           // 本轮若无人再出无懈，最初锦囊的最终状态（生效 / 失效）
           negated: negated
