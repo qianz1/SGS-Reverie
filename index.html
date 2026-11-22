@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <!-- 横屏战场：锁定缩放，避免手机手势缩放打乱绝对定位布局 -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#17120f">
+  <title>三国杀-狂想</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- ================= 开局主界面 · 模式选择 =================
+     排布：左侧竖排文字菜单，右侧整片留白给背景图 —— 不用卡片宫格。
+     背景图 assets/backgrounds/background1.webp 只负责【氛围底图】：
+     object-fit:cover 居中裁切铺满，不变形、无黑边、任意比例自适应。
+     ★ 图里请不要画按钮、文字或边框 —— 所有 UI 由下方 DOM / CSS 绘制，
+       菜单位置与图片尺寸完全解耦，换图 / 换比例都不会错位。
+     图片缺失或加载失败时自动回退到纯 CSS 绘制的水墨远山氛围。
+     z-index 高于选将 overlay、低于竖屏提示。 -->
+<div id="mode-screen" class="mode-screen">
+  <div id="mode-bg-wrap" class="mode-bg-wrap">
+    <img id="mode-bg" class="mode-bg" alt="">
+  </div>
+  <div class="mode-veil"></div>
+
+  <!-- 右侧竖排题字：纯装饰，不承载交互，给留白一点呼吸感 -->
+  <div class="mode-side" aria-hidden="true">
+    <span>运 筹 帷 幄</span><i></i><span>一 局 定 胜 负</span>
+  </div>
+
+  <!-- 左侧内容块 -->
+  <div class="mode-content">
+    <div class="mode-kicker"><i></i>MODE SELECT &nbsp;/&nbsp; 模式选择</div>
+    <h1 class="mode-title">三国杀<span class="mode-dash">-</span>狂想</h1>
+    <div class="mode-rule"><i></i><span>◆</span><i></i></div>
+
+    <nav class="mode-menu">
+      <button class="mode-item open" data-mode="1v1" type="button">
+        <span class="mode-no">01</span>
+        <span class="mode-text">
+          <span class="mode-name">单挑</span>
+          <span class="mode-desc">单人对决 &nbsp;·&nbsp; 一局定胜负</span>
+        </span>
+        <span class="mode-tag">进入对局 <em>→</em></span>
+      </button>
+
+      <button class="mode-item locked" data-mode="2v2" type="button">
+        <span class="mode-no">02</span>
+        <span class="mode-text">
+          <span class="mode-name">组队</span>
+          <span class="mode-desc">双人配合 &nbsp;·&nbsp; 战术协作</span>
+        </span>
+        <span class="mode-tag">敬请期待</span>
+      </button>
+
+      <button class="mode-item locked" data-mode="ddz" type="button">
+        <span class="mode-no">03</span>
+        <span class="mode-text">
+          <span class="mode-name">斗地主</span>
+          <span class="mode-desc">三人快局 &nbsp;·&nbsp; 欢乐出牌</span>
+        </span>
+        <span class="mode-tag">敬请期待</span>
+      </button>
+
+      <button class="mode-item locked" data-mode="junzheng" type="button">
+        <span class="mode-no">04</span>
+        <span class="mode-text">
+          <span class="mode-name">军争</span>
+          <span class="mode-desc">八人身份 &nbsp;·&nbsp; 阵营对抗</span>
+        </span>
+        <span class="mode-tag">敬请期待</span>
+      </button>
+    </nav>
+
+    <p class="mode-foot">当前仅开放 01 单挑 &nbsp;·&nbsp; 其余模式敬请期待</p>
+  </div>
+
+  <div id="mode-toast" class="mode-toast"></div>
+</div>
+
+<!-- 战场容器：所有框体按参考图用绝对定位摆放 -->
+<div id="app">
+
+  <!-- 战斗界面氛围底图：assets/backgrounds/background3.webp
+       cover 居中裁切铺满，不变形、无黑边；只做氛围，所有框体仍由 DOM 绘制。
+       加载成功才给 #app 加 .battle-art-on（隐藏 CSS 远山纹理）；
+       缺失 / 失败 / DOM 级 error 一律回退到原来的纯 CSS 远景。 -->
+  <div id="battle-bg-wrap" class="battle-bg-wrap">
+    <img id="battle-bg" class="battle-bg" alt="">
+  </div>
+  <div class="battle-veil"></div>
+
+  <!-- 顶栏：轮次 / 牌堆 / 重开（当前阶段不再展示） -->
+  <header class="topbar">
+    <div class="status">
+      <span id="round-info">第 1 轮</span>
+      <span id="deck-info">牌堆 78 张</span>
+      <button id="btn-restart" class="btn tiny">重开</button>
+      <span class="brand-mini">三国杀-狂想</span>
+    </div>
+  </header>
+
+  <!-- 敌方武将卡：顶部居中；右上角「敌」，左下角只显示手牌张数数字 -->
+  <section id="ai-area" class="hero-card foe" data-player="ai">
+    <img class="hero-art" id="ai-art" alt="">
+    <div class="hero-faction" id="ai-faction">蜀</div>
+    <div class="hero-q">敌</div>
+    <div class="hero-name" id="ai-name">赵云</div>
+    <div class="hero-hp" id="ai-hp"></div>
+    <div class="hero-hand-count" id="ai-count">0</div>
+    <!-- 铁索连环：处于连环状态时显示的横向锁链 -->
+    <div class="chain-mark hidden" id="ai-chain"></div>
+    <!-- 其他角色的判定区：延时锦囊图标贴在角色框下侧边框上，由 ui.js 渲染 -->
+    <div id="ai-judge" class="hero-judge"></div>
+    <!-- 其他角色的装备：角色框下半部分的缩小版装备栏，全空时整块隐藏 -->
+    <div id="ai-equips" class="hero-equips hidden"></div>
+    <!-- 行动顺序序号：多人局显示在框外下方；当前 1v1 不显示 -->
+    <div class="hero-seat-out" id="ai-seat"></div>
+    <!-- 角色信息：鼠标悬停或点击角色框时显示（技能逐条换行） -->
+    <div class="hero-info" id="ai-info"></div>
+    <!-- 技能发动大字：由 ui.js 动态插入，平滑浮出后自动移除 -->
+    <div class="skill-banner-host" id="ai-skill-banner"></div>
+    <!-- 受击特效：伤害数值飘字 + 雷电电弧 / 火焰，动画结束自动移除 -->
+    <div class="hit-fx-host" id="ai-hit-fx"></div>
+  </section>
+
+  <!-- 中央展示区：本回合打出的牌（最多 3 张，回合结束清空） -->
+  <section class="table" id="table">
+    <div id="table-card" class="table-card"></div>
+  </section>
+  <!-- 引导 / 描述文字移到展示区下方，避免遮挡展示区里的卡牌 -->
+  <div id="hint" class="hint"></div>
+
+  <!-- 牌局记录浮层：左下 -->
+  <aside class="log-box">
+    <div class="log-title">牌局记录</div>
+    <div id="log" class="log" aria-label="对局日志"></div>
+  </aside>
+
+  <!-- 技能按钮位：右下裸按钮，无外框（对应参考图「雷击 / 鬼道」位置） -->
+  <aside id="skill-panel" class="skill-panel">
+    <div id="skill-actions" class="sp-actions"></div>
+  </aside>
+
+  <!-- 玩家武将卡：右下角金框，右上角「主」 -->
+  <section id="me-area" class="hero-card self" data-player="me">
+    <img class="hero-art" id="me-art" alt="">
+    <div class="hero-faction" id="me-faction">蜀</div>
+    <div class="hero-q">主</div>
+    <div class="hero-name" id="me-name">张飞</div>
+    <div class="hero-hp" id="me-hp"></div>
+    <!-- 铁索连环：处于连环状态时显示的横向锁链 -->
+    <div class="chain-mark hidden" id="me-chain"></div>
+    <!-- 自己的行动顺序序号：多人局显示在框内下方；当前 1v1 不显示 -->
+    <div class="hero-seat-in" id="me-seat"></div>
+    <!-- 角色信息：鼠标悬停或点击角色框时显示（技能逐条换行） -->
+    <div class="hero-info" id="me-info"></div>
+    <!-- 技能发动大字：由 ui.js 动态插入，平滑浮出后自动移除 -->
+    <div class="skill-banner-host" id="me-skill-banner"></div>
+    <!-- 受击特效：伤害数值飘字 + 雷电电弧 / 火焰，动画结束自动移除 -->
+    <div class="hit-fx-host" id="me-hit-fx"></div>
+  </section>
+
+  <!-- 目标牌区面板：顺手牵羊 / 过河拆桥选牌时弹出（标题 + 手牌 + 装备牌 + 判定区牌） -->
+  <div id="target-panel" class="target-panel hidden"></div>
+
+  <!-- 五谷丰登选牌面板：亮出的牌一栏横排，点击即选（无需确认） -->
+  <div id="wugu-panel" class="wugu-panel hidden"></div>
+
+  <!-- 【火计·火攻】查看目标手牌面板：使用者点选一张让目标展示（正面，不用牌背） -->
+  <div id="huogong-peek-panel" class="peek-panel hidden"></div>
+
+  <!-- 操作按钮区：手牌上方横排（由 ui.js 动态生成） -->
+  <div id="actions" class="actions"></div>
+
+  <!-- 玩家判定区：无需面板，图标直接贴在手牌区左上方的背景上 -->
+  <div id="me-judge-area" class="judge-area">
+    <div id="me-judge-marks" class="judge-marks"></div>
+  </div>
+
+  <!-- 玩家装备区：手牌区左侧，四条横栏（武器 / 防具 / +1马 / -1马），由 ui.js 渲染 -->
+  <section id="me-equip-area" class="equip-area"></section>
+
+  <!-- 玩家手牌区：底部横排（对应参考图底部四张手牌） -->
+  <div class="hand-area">
+    <div class="hand" id="me-hand"></div>
+    <span class="count" id="me-count"></span>
+  </div>
+
+</div>
+
+<!-- 竖屏提示：手机端默认横屏 -->
+<div id="rotate-hint" class="rotate-hint">
+  <div class="rot-icon">▭</div>
+  <div class="rot-title">请横屏游玩</div>
+  <div class="rot-sub">本作按横屏战场布局设计，旋转设备即可进入</div>
+  <button id="btn-ignore-rotate" class="btn tiny">仍要竖屏查看</button>
+</div>
+
+<!-- 开局选将 —— 与局内同款角色框 + 下方选择按钮
+     背景图 assets/backgrounds/background2.webp 只做氛围（cover 铺满）；
+     角色框由 ui.js 用 .hero-card 同款结构生成，hover / 点击显示角色信息。 -->
+<div id="start-screen" class="overlay start-screen hidden">
+  <div id="start-bg-wrap" class="start-bg-wrap">
+    <img id="start-bg" class="start-bg" alt="">
+  </div>
+  <div class="start-veil"></div>
+  <div class="start-content">
+    <div class="start-kicker"><i></i>CHARACTER SELECT &nbsp;/&nbsp; 选择武将<i></i></div>
+    <h2 class="start-title">选择你的武将</h2>
+    <p class="start-sub">另一位武将将由 AI 执掌 &nbsp;·&nbsp; 体力先归零的一方落败</p>
+
+    <!-- 势力筛选 + 搜索：位于角色框上方，独立于 #char-picker，
+         过滤时只重建下方角色框，输入框不会失焦。 -->
+    <div class="pick-tools">
+      <label class="pick-search" id="pick-search-wrap">
+        <span class="pick-search-ico" aria-hidden="true"></span>
+        <input id="pick-search" class="pick-search-input" type="search"
+               placeholder="搜索武将 / 称号 / 技能" autocomplete="off" spellcheck="false">
+        <button id="pick-search-clear" class="pick-search-clear" type="button"
+                aria-label="清空搜索">×</button>
+      </label>
+      <div class="pick-factions" id="pick-factions">
+        <button class="pf-btn active" data-faction="全" type="button">全</button>
+        <button class="pf-btn" data-faction="魏" type="button">魏</button>
+        <button class="pf-btn" data-faction="蜀" type="button">蜀</button>
+        <button class="pf-btn" data-faction="吴" type="button">吴</button>
+        <button class="pf-btn" data-faction="群" type="button">群</button>
+        <button class="pf-btn" data-faction="晋" type="button">晋</button>
+        <button class="pf-btn" data-faction="神" type="button">神</button>
+      </div>
+    </div>
+
+    <div id="char-picker" class="char-picker"></div>
+    <p class="start-tip">悬停或点击角色框查看技能 &nbsp;·&nbsp; 点「选择此将」开始对局</p>
+  </div>
+</div>
+
+<!-- 结算 -->
+<div id="result-screen" class="overlay hidden">
+  <div class="panel small-panel">
+    <h2 id="result-text"></h2>
+    <p id="result-sub" class="panel-sub"></p>
+    <button id="btn-again" class="btn primary">再来一局</button>
+  </div>
+</div>
+
+<!-- 按依赖顺序引入；无构建步骤，直接双击本文件即可游玩 -->
+<script src="js/core.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/cards.js"></script>
+<script src="js/equipment.js"></script>
+<script src="js/zones.js"></script>
+<script src="js/judge.js"></script>
+<script src="js/tricks.js"></script>
+<script src="js/characters/zhangfei.js"></script>
+<script src="js/characters/zhaoyun.js"></script>
+<script src="js/characters/shenzhaoyun.js"></script>
+<script src="js/characters/jushou.js"></script>
+<script src="js/characters/wolongzhuge.js"></script>
+<script src="js/player.js"></script>
+<script src="js/ai.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/game.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
