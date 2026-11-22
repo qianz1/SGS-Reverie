@@ -1,0 +1,2585 @@
+/* ==========================================================
+   style.css — 横屏战场布局（参考三国杀牌面：角色框浮于场景，
+   技能按钮裸按钮右下，手牌横排底部，牌局记录浮层左下）
+   CSS 绘制框体与卡面作为「图片 UI 加载失败」时的回退方案。
+   坐标系：#app 铺满视口，各框体绝对定位；横向尺寸用 vw，
+   纵向尺寸用 vh，并用 clamp() 兜住小屏。
+   尺寸变量集中在 :root，电脑端媒体查询统一放大。
+   ========================================================== */
+
+/* ★ 技能发动大字用的字体：assets/fonts/HanYiWeiBeiJian-1.woff2。
+   font-display: swap + 字体栈里的常规字体 = 文件缺失 / 加载失败 / 解码失败
+   时天然回退到正常字体，不会阻塞渲染。
+   只有 ui.js 的 document.fonts.load() 探测成功后，才给 #app 加
+   .skill-font-ready，横幅才真正套用这个字体（双重保险）。 */
+@font-face {
+  font-family: "SGSHanYiWeiBei";
+  src: url("../assets/fonts/HanYiWeiBeiJian-1.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+:root {
+  /* 卡牌 / 角色框基础尺寸（手机端）；电脑端在下方媒体查询里整体放大 */
+  --card-w: clamp(44px, 6.2vw, 60px);
+  --card-h: clamp(60px, 21vh, 88px);
+  --card-min-w: 34px;
+  --card-name-size: clamp(18px, 4.6vh, 26px);
+  --card-corner-size: clamp(9px, 1.5vh, 13px);
+  --card-trick-name-size: clamp(11px, 2.3vh, 15px);
+  --hand-h: clamp(66px, 22vh, 96px);
+  --hand-gap: clamp(2px, .55vw, 6px);
+  /* 玩家装备区：放在手牌区左侧，四条横栏；总高度比手牌区略高 */
+  --equip-w: clamp(104px, 16vw, 190px);
+  --equip-extra-h: clamp(8px, 1.6vh, 16px);
+  --hand-left: calc(1vw + var(--equip-w) + 1.2vw);
+  --actions-bottom: clamp(94px, 25vh, 132px);
+  --sel-lift: 9px;
+  --hero-w: clamp(70px, 9vw, 96px);
+  --hero-h: clamp(94px, 26vh, 138px);
+
+  /* 展示区 / 记录框共用同一纵向区间；引导文案落在展示区正下方 */
+  --table-top: clamp(168px, 43vh, 230px);
+  --table-h: clamp(76px, 21vh, 110px);
+
+  --bg-deep: #0f0d0b;
+  --panel-solid: #241c17;
+  --line: #5b4634;
+  --gold: #d9b26a;
+  --gold-dim: #8d7145;
+  --text: #f2e8d5;
+  --muted: #b7a68e;
+  /* 势力字色（角色框左上角纯文字，无背景）：蜀暗红 / 魏蓝 / 吴绿 /
+     群灰 / 神黄 / 晋紫。颜色集中在这里，六个势力规则只引用变量。 */
+  --shu:  #a33028;   /* 蜀 · 暗红 */
+  --wei:  #4a7ac9;   /* 魏 · 蓝 */
+  --wu:   #3f9e5b;   /* 吴 · 绿 */
+  --qun:  #9b9b9b;   /* 群 · 灰 */
+  --shen: #ffd75e;   /* 神 · 黄 */
+  --jin:  #cdb8ff;   /* 晋 · 紫 */
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0; padding: 0;
+  width: 100%; height: 100%;
+  overflow: hidden;
+  background: var(--bg-deep);
+  color: var(--text);
+  font-family: "PingFang SC", "Microsoft YaHei", "WenQuanYi Micro Hei", sans-serif;
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* ---------- 战场背景：纯 CSS 远景（远山 / 水面 / 雾气） ---------- */
+#app {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 320px;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse 60% 38% at 50% 34%, rgba(150, 176, 172, .30), transparent 70%),
+    radial-gradient(ellipse 90% 50% at 50% 78%, rgba(96, 126, 122, .34), transparent 72%),
+    linear-gradient(180deg, #8fa6a8 0%, #a9bcb7 22%, #8ea49c 46%, #4a5f5b 70%, #263630 100%);
+}
+/* 远山剪影 */
+#app::before {
+  content: "";
+  position: absolute; left: -5%; right: -5%; top: 28%;
+  height: 22%;
+  background: linear-gradient(180deg, rgba(60, 82, 76, .55), rgba(60, 82, 76, 0));
+  clip-path: polygon(0 100%, 0 62%, 8% 48%, 15% 66%, 24% 36%, 33% 70%, 42% 52%, 51% 74%, 61% 40%, 70% 68%, 79% 50%, 88% 72%, 100% 56%, 100% 100%);
+  pointer-events: none;
+}
+/* 水面横向淡纹 */
+#app::after {
+  content: "";
+  position: absolute; left: 0; right: 0; bottom: 0;
+  height: 46%;
+  background: repeating-linear-gradient(180deg, rgba(255,255,255,.035) 0 1px, transparent 1px 9px);
+  pointer-events: none;
+}
+
+/* ================= 顶栏 ================= */
+.topbar {
+  position: absolute; top: 0; left: 0; right: 0;
+  height: clamp(26px, 7vh, 34px);
+  display: flex; align-items: center; gap: 8px;
+  padding: 0 clamp(6px, 1.2vw, 14px);
+  background: linear-gradient(180deg, rgba(12,10,8,.86), rgba(12,10,8,.42));
+  border-bottom: 1px solid rgba(217,178,106,.28);
+  z-index: 8;
+}
+.status {
+  width: 100%;
+  display: flex; align-items: center; justify-content: flex-end;
+  gap: clamp(6px, 1vw, 12px);
+  font-size: clamp(9px, 1.35vh, 12px);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.brand-mini {
+  color: var(--gold);
+  font-weight: 700;
+  letter-spacing: 2px;
+  padding-left: 8px;
+  border-left: 1px solid var(--line);
+}
+
+/* ================= 武将卡（角色框） ================= */
+.hero-card {
+  /* ── 竖排名字的区间参数（ui.render 会写入 --name-scale / --hp-pips）──
+     名字在左侧、紧接「势力图标」下方开始，字号固定与势力一致；
+     --name-bottom 只作为「不碰到体力圆点」的保护边界 —— 仅当文字确实
+     会伸到圆点列时才缩小字号，其余一律保留原有字号。
+     （x/y 体力文字靠自身 z-index 保持可读，不参与边界计算。）
+     电脑端 / 极矮横屏只在各自媒体查询里覆盖这几个变量，口径不变。 */
+  --hero-label-left: 5px;  /* ★ 势力文字与名字共用同一个左边界，严格同列 */
+  --faction-fs: clamp(10px, 1.7vh, 14px);
+  --pip-size: clamp(7px, 1.15vh, 10px);
+  --pip-gap: 2px;
+  --hp-bottom: 19px;
+  --hp-pips: 4;           /* 由 ui.js 按该角色体力上限覆盖 */
+  --name-scale: 0.5;      /* = 1/名字字数，由 ui.js 覆盖；默认按 2 字算 */
+  --name-extra-bottom: 0px;
+  --name-top: calc(5px + var(--faction-fs) + 5px);
+  /* 下边界 = 圆点列顶 + 4px 留白；只有越过它才算「确定会碰到体力圆点」 */
+  --name-bottom: calc(var(--hp-bottom) + var(--hp-pips) * var(--pip-size) +
+                  (var(--hp-pips) - 1) * var(--pip-gap) + 4px +
+                  var(--name-extra-bottom));
+  --name-avail: max(14px, calc(var(--hero-h) - var(--name-top) - var(--name-bottom)));
+  /* ★ 字号固定 = 势力字号，不再随框高 / 字数自动调整。
+     只有当「字数 × 势力字号」确实会碰到体力圆点（即
+     可用高度 × 1/字数 比势力字号更小）时，才保护性缩到刚好不碰；
+     其余一律保留原有字号。 */
+  --name-fs: min(var(--faction-fs),
+                 calc(var(--name-avail) * var(--name-scale)));
+  position: absolute;
+  width: var(--hero-w);
+  height: var(--hero-h);
+  z-index: 5;
+  border: 2px solid #8a6d45;
+  border-radius: 6px;
+  background:
+    linear-gradient(160deg, rgba(84,66,48,.96), rgba(38,29,22,.97) 60%, rgba(24,18,14,.98)),
+    var(--panel-solid);
+  box-shadow: 0 6px 18px rgba(0,0,0,.55), inset 0 0 20px rgba(0,0,0,.35);
+  transition: border-color .2s, box-shadow .2s;
+}
+/* 无立绘时用暗纹代替 */
+.hero-card::before {
+  content: "";
+  position: absolute; inset: 0;
+  background: repeating-linear-gradient(135deg, rgba(255,255,255,.022) 0 2px, transparent 2px 7px);
+  border-radius: 4px;
+  pointer-events: none;
+}
+.hero-card.foe {
+  top: clamp(29px, 7.4vh, 42px);
+  left: 50%; transform: translateX(-50%);
+}
+.hero-card.self {
+  right: 1.2vw;
+  bottom: 1vh;
+  border-color: var(--gold);
+  box-shadow: 0 6px 20px rgba(0,0,0,.6), 0 0 0 1px rgba(217,178,106,.35), inset 0 0 22px rgba(120,80,30,.25);
+}
+.hero-card.acting {
+  border-color: #8fe0a0;
+  box-shadow: 0 0 0 2px rgba(143,224,160,.45), 0 0 22px rgba(143,224,160,.4), 0 6px 18px rgba(0,0,0,.5);
+}
+/* ★ 铁索连环：横向锁链。不旋转角色框，只在框中央画一条金属链表示连环状态。 */
+.chain-mark {
+  position: absolute;
+  left: 6%; right: 6%;
+  top: 52%;
+  height: 14px;
+  transform: translateY(-50%);
+  z-index: 8;
+  pointer-events: none;
+  border-top: 2px solid rgba(232,210,160,.95);
+  border-bottom: 2px solid rgba(232,210,160,.95);
+  background: repeating-linear-gradient(90deg,
+    transparent 0 5px,
+    rgba(232,210,160,.85) 5px 8px,
+    transparent 8px 13px);
+  box-shadow: 0 0 8px rgba(0,0,0,.85), 0 0 7px rgba(240,205,120,.4);
+}
+.chain-mark.hidden { display: none; }
+/* ★ 其他角色的判定区：延时锦囊图标贴在角色框下侧边框上（不遮挡角色名）。
+   图标尺寸 = 基础尺寸的 2.5 倍。 */
+.hero-judge {
+  position: absolute;
+  left: 4px; right: 4px; bottom: -7px;
+  z-index: 9;
+  display: flex; align-items: center; justify-content: center;
+  gap: 6px;
+  pointer-events: none;
+}
+.hero-judge .judge-mark {
+  width: clamp(40px, 5.75vh, 55px);
+  height: clamp(40px, 5.75vh, 55px);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.hero-judge .judge-mark.fallback { font-size: clamp(22px, 3.5vh, 32px); }
+/* 受击：角色框左右抖动一下 + 红闪。.foe 用 translateX(-50%) 居中，
+   所以 keyframes 里把它作为基准位移叠加，避免抖动时卡片偏位。 */
+.hero-card.hit {
+  animation: hero-hit .46s ease-in-out 1;
+  border-color: #e35b52;
+}
+.hero-card.self.hit { animation-name: hero-hit-self; }
+@keyframes hero-hit {
+  0%, 100% { transform: translateX(-50%); }
+  15% { transform: translate(calc(-50% - 9px), 0) rotate(-1.5deg); }
+  30% { transform: translate(calc(-50% + 8px), 0) rotate(1.5deg); }
+  45% { transform: translate(calc(-50% - 6px), 0) rotate(-1deg); }
+  60% { transform: translate(calc(-50% + 5px), 0) rotate(1deg); }
+  75% { transform: translate(calc(-50% - 2px), 0); }
+  50% { box-shadow: 0 0 0 3px rgba(227,91,82,.85), 0 0 26px rgba(255,70,60,.75), 0 6px 18px rgba(0,0,0,.5); }
+}
+@keyframes hero-hit-self {
+  0%, 100% { transform: translateX(0); }
+  15% { transform: translateX(-9px) rotate(-1.5deg); }
+  30% { transform: translateX(8px) rotate(1.5deg); }
+  45% { transform: translateX(-6px) rotate(-1deg); }
+  60% { transform: translateX(5px) rotate(1deg); }
+  75% { transform: translateX(-2px); }
+  50% { box-shadow: 0 0 0 3px rgba(227,91,82,.85), 0 0 26px rgba(255,70,60,.75), 0 6px 18px rgba(0,0,0,.5); }
+}
+
+/* ================= 技能发动大字横幅 =================
+   角色发动技能时，在其角色框内平滑浮出技能名（如「渐营」）。
+   默认用主题常规字体；#app.skill-font-ready 时改用汉仪魏碑，
+   字体文件加载失败则始终保持常规字体。 */
+.skill-banner-host {
+  position: absolute;
+  left: 0; right: 0;
+  top: 34%;
+  z-index: 12;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none;      /* 绝不挡住点角色框选目标 / 出牌 */
+}
+.skill-banner {
+  max-width: 96%;
+  color: #ffe6a8;
+  font-size: clamp(20px, 5.2vh, 46px);
+  font-weight: 800;
+  letter-spacing: .12em;
+  white-space: nowrap;
+  text-align: center;
+  /* 常规字体栈 = 字体加载失败时的回退 */
+  font-family: "PingFang SC", "Microsoft YaHei", "WenQuanYi Micro Hei", sans-serif;
+  text-shadow:
+    0 2px 4px rgba(0,0,0,.95),
+    0 0 10px rgba(0,0,0,.9),
+    0 0 22px rgba(240,190,90,.75),
+    0 0 40px rgba(240,170,70,.45);
+  -webkit-text-stroke: .5px rgba(70,40,16,.55);
+  /* 淡出只驱动 opacity + transform，不再用滤镜，合成开销更小也更顺 */
+  will-change: transform, opacity;
+  animation: skill-banner 1.6s cubic-bezier(.22,.75,.3,1) both;
+}
+#app.skill-font-ready .skill-banner {
+  font-family: "SGSHanYiWeiBei", "PingFang SC", "Microsoft YaHei",
+               "WenQuanYi Micro Hei", sans-serif;
+  letter-spacing: .06em;
+}
+@keyframes skill-banner {
+  /* ★ 每个关键帧都显式写 filter: blur(0)：
+     只让「入场 0%→16%」有聚焦式模糊，之后一路锁死为清晰。
+     旧版 18% 之后的关键帧没写 filter，浏览器会把 blur(0) 一路插值到
+     结尾的 blur(1px)，导致停留与淡出全程慢慢变糊 —— 那不是 intended 效果。
+     淡出改为纯 opacity 多段细分 + 极缓上移 / 轻微回收，不再放大、不再模糊；
+     描边与光晕随 opacity 一起平滑收掉，末段用 ease-in 干净收尾。 */
+  0%   { opacity: 0;   transform: translateY(12px)  scale(.86);  filter: blur(2.5px); }
+  16%  { opacity: 1;   transform: translateY(0)     scale(1.05); filter: blur(0); }
+  26%  { opacity: 1;   transform: translateY(0)     scale(1);    filter: blur(0); }
+  62%  { opacity: 1;   transform: translateY(0)     scale(1);    filter: blur(0); }
+  76%  { opacity: .92; transform: translateY(-3px)  scale(1);    filter: blur(0); }
+  88%  { opacity: .58; transform: translateY(-8px)  scale(.995); filter: blur(0); }
+  95%  { opacity: .22; transform: translateY(-13px) scale(.985); filter: blur(0);
+         animation-timing-function: ease-in; }
+  100% { opacity: 0;   transform: translateY(-18px) scale(.98);  filter: blur(0); }
+}
+
+
+/* ==========================================================
+   受击特效：伤害数值飘字 + 雷电电弧 / 火焰
+   ----------------------------------------------------------
+   由 UI.showHitFX() 在每个角色框的 .hit-fx-host 里插入一组独立
+   .hit-fx，动画播完自动移除；pointer-events:none 全程不挡选目标。
+   普通伤害只有飘字；属性伤害额外叠一层闪光 + 电弧 / 火苗。
+   ========================================================== */
+.hit-fx-host {
+  position: absolute; inset: 0;
+  z-index: 14;
+  overflow: visible;
+  pointer-events: none;
+}
+.hit-fx { position: absolute; inset: 0; pointer-events: none; }
+
+/* ① 伤害数值飘字 */
+.dmg-float {
+  position: absolute;
+  left: 50%; top: 42%;
+  z-index: 3;
+  font-size: clamp(26px, 6.2vh, 54px);
+  font-weight: 900;
+  line-height: 1;
+  color: #fff1e0;
+  white-space: nowrap;
+  -webkit-text-stroke: 1.2px #7a1c12;
+  text-shadow: 0 2px 5px #000, 0 0 14px rgba(255,80,50,.95),
+               0 0 30px rgba(255,60,30,.6);
+  transform: translate(-50%, -50%);
+  animation: dmg-float-up 1.15s cubic-bezier(.2,.8,.3,1) both;
+}
+.hit-fx.fx-thunder .dmg-float {
+  color: #eaf4ff;
+  -webkit-text-stroke-color: #2a3f8a;
+  text-shadow: 0 2px 5px #000, 0 0 14px rgba(120,180,255,.98),
+               0 0 32px rgba(90,140,255,.7);
+}
+.hit-fx.fx-fire .dmg-float {
+  color: #fff0cf;
+  -webkit-text-stroke-color: #8a2f0c;
+  text-shadow: 0 2px 5px #000, 0 0 14px rgba(255,150,40,.98),
+               0 0 32px rgba(255,80,20,.68);
+}
+@keyframes dmg-float-up {
+  0%   { opacity: 0; transform: translate(-50%, -50%) scale(.5); }
+  18%  { opacity: 1; transform: translate(-50%, -72%) scale(1.18); }
+  32%  { opacity: 1; transform: translate(-50%, -78%) scale(1); }
+  70%  { opacity: 1; transform: translate(-50%, -96%) scale(1); }
+  100% { opacity: 0; transform: translate(-50%, -136%) scale(.92); }
+}
+
+/* ② 属性伤害整框闪光 */
+.fx-flash {
+  position: absolute; inset: -8%;
+  z-index: 1;
+  border-radius: 6px;
+  animation: fx-flash .62s ease-out both;
+}
+.hit-fx.fx-thunder .fx-flash {
+  background: radial-gradient(ellipse at 50% 40%,
+    rgba(160,205,255,.78), rgba(70,110,255,.34) 46%, transparent 74%);
+}
+.hit-fx.fx-fire .fx-flash {
+  background: radial-gradient(ellipse at 50% 80%,
+    rgba(255,196,70,.82), rgba(255,84,20,.42) 48%, transparent 76%);
+}
+@keyframes fx-flash {
+  0%   { opacity: 0; }
+  22%  { opacity: .95; }
+  100% { opacity: 0; }
+}
+
+/* ③ 雷电电弧：SVG 折线 + 双层发光，分段闪烁 */
+.fx-arcs {
+  position: absolute; inset: -10% -6%;
+  z-index: 2;
+  width: 112%; height: 120%;
+  animation: arc-flicker .72s steps(1, end) both;
+}
+.fx-arc {
+  fill: none;
+  stroke: #e2f1ff;
+  stroke-width: 2.6;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  opacity: .96;
+  filter: drop-shadow(0 0 4px #8ec5ff) drop-shadow(0 0 10px #4f8cff);
+}
+.fx-arc.a2 { stroke: #a9d4ff; stroke-width: 1.7; opacity: .82; }
+.fx-arc.a3 { stroke: #ffffff; stroke-width: 1.1; opacity: .92; }
+@keyframes arc-flicker {
+  0%   { opacity: 0;   transform: translateX(0); }
+  8%   { opacity: 1;   transform: translateX(0); }
+  16%  { opacity: .22; }
+  24%  { opacity: 1;   transform: translateX(2px); }
+  38%  { opacity: .48; }
+  50%  { opacity: 1;   transform: translateX(-2px); }
+  68%  { opacity: .7;  transform: translateX(1px); }
+  84%  { opacity: .9;  transform: translateX(0); }
+  100% { opacity: 0;   transform: translateX(0); }
+}
+
+/* ④ 火焰：多股火苗自下而上摇摆升腾，错峰起飞 */
+.fx-flames {
+  position: absolute; left: 0; right: 0; bottom: -6%;
+  height: 100%;
+  z-index: 2;
+}
+.fx-flame {
+  position: absolute; bottom: 0;
+  width: 16%; height: 64%;
+  transform-origin: 50% 100%;
+  /* 上尖下圆的水滴状火苗（顶部水平半径小、底部大） */
+  border-radius: 22% 22% 50% 50% / 42% 42% 62% 62%;
+  background: radial-gradient(ellipse at 50% 80%,
+    #fff6c2 0%, #ffc247 22%, #ff7a18 48%,
+    rgba(220,45,10,.22) 74%, transparent 100%);
+  filter: blur(.3px) drop-shadow(0 0 5px rgba(255,120,30,.85));
+  animation: flame-rise .98s ease-out both;
+}
+/* 六股错峰、宽度收窄，避免连成一整片光墙 */
+.fx-flame:nth-child(1) { left: 3%;  width: 15%; height: 58%; animation-delay: 0s;    }
+.fx-flame:nth-child(2) { left: 21%; width: 18%; height: 70%; animation-delay: .10s; }
+.fx-flame:nth-child(3) { left: 40%; width: 15%; height: 60%; animation-delay: .04s; }
+.fx-flame:nth-child(4) { left: 58%; width: 19%; height: 72%; animation-delay: .16s; }
+.fx-flame:nth-child(5) { left: 78%; width: 15%; height: 56%; animation-delay: .07s; }
+.fx-flame:nth-child(6) { left: 32%; width: 13%; height: 80%; animation-delay: .22s;
+                         opacity: .7; }
+@keyframes flame-rise {
+  0%   { opacity: 0;   transform: translateY(22%) scale(.5, .3)  skewX(4deg); }
+  25%  { opacity: .96; transform: translateY(2%)  scale(.95, 1)  skewX(3deg); }
+  60%  { opacity: .85; transform: translateY(-24%) scale(1.05, 1.16) skewX(-5deg); }
+  100% { opacity: 0;   transform: translateY(-72%) scale(.7, 1.4) skewX(4deg); }
+}
+
+/* ★ 势力标识改成纯文字：没有背景、边框、内边距、圆角，和名字一样
+   直接叠在角色框（含立绘）上，靠 text-shadow 保证任意底图都可读。
+   left 与 .hero-name 共用 --hero-label-left，竖排同一列；line-height:1
+   让单字高度精确等于 --faction-fs，名字的 --name-top 才算得准。 */
+.hero-faction {
+  position: absolute; top: 5px; left: var(--hero-label-left);
+  z-index: 3;
+  font-size: var(--faction-fs); font-weight: 700;
+  line-height: 1;
+  writing-mode: vertical-rl; text-orientation: upright;
+  color: var(--shu);
+  text-shadow: 0 1px 3px #000, 0 0 6px rgba(0,0,0,.95);
+  background: none; border: 0; padding: 0; border-radius: 0;
+}
+.hero-faction[data-faction="魏"] { color: var(--wei); }
+.hero-faction[data-faction="吴"] { color: var(--wu); }
+.hero-faction[data-faction="群"] { color: var(--qun); }
+.hero-faction[data-faction="蜀"] { color: var(--shu); }
+.hero-faction[data-faction="神"] { color: var(--shen); }
+.hero-faction[data-faction="晋"] { color: var(--jin); }
+
+/* 右上角身份标记：原「?」位置改为「主」/「敌」字样 */
+.hero-q {
+  position: absolute; top: 3px; right: 3px;
+  width: clamp(15px, 2.2vh, 18px); height: clamp(15px, 2.2vh, 18px);
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: clamp(9px, 1.4vh, 11px); font-weight: 700; line-height: 1;
+  color: #2a1c10;
+  background: radial-gradient(circle at 35% 30%, #f0d7a0, #b08a45);
+  border: 1px solid #f0d9a5;
+  z-index: 2;
+}
+.foe .hero-q {
+  color: #161d20;
+  background: radial-gradient(circle at 35% 30%, #dde5e8, #8b979d);
+  border-color: #c3cdd0;
+}
+/* ★ 角色名：只写名字（势力由左上角标识表示），竖排、无外框、无底色，
+   颜色沿用主题字体色。
+   ★ 位置：左侧同一列、紧接「势力图标」下方开始（justify-content:flex-start），
+     与势力图标 / 圆点左对齐，形成一条竖排信息带；
+     bottom 仍用 --name-bottom 作为「不碰到体力圆点」的保护边界。
+   ★ 字号固定 = 势力字号（--name-fs），不再随框高自动调整；只有确实
+     会碰到体力圆点时才缩小。line-height:1 + letter-spacing:0
+     让「总高度 = 字数 × 字号」，overflow:hidden 兜底不越界。 */
+.hero-name {
+  position: absolute;
+  top: var(--name-top); bottom: var(--name-bottom);
+  left: var(--hero-label-left); right: auto; width: auto;
+  display: flex; align-items: center; justify-content: flex-start;
+  writing-mode: vertical-rl; text-orientation: upright;
+  font-size: var(--name-fs);
+  line-height: 1;
+  letter-spacing: 0;
+  font-weight: 700;
+  color: var(--text);
+  text-shadow: 0 1px 3px #000, 0 0 6px rgba(0,0,0,.95);
+  white-space: nowrap;
+  overflow: hidden;
+  border: 0; background: none;
+  z-index: 3;
+}
+.hero-hp {
+  position: absolute; left: 5px; bottom: var(--hp-bottom);
+  display: flex; flex-direction: column; gap: var(--pip-gap);
+}
+.hero-hp .pip {
+  width: var(--pip-size);
+  height: var(--pip-size);
+  border-radius: 50%;
+  border: 1px solid #d8bd85;
+  display: block;
+}
+/* ★ 体力圆点颜色随「当前体力 / 体力上限」比例变化：
+     > 2/3 绿 | 1/3 < r <= 2/3 橙 | <= 1/3 红
+   由 ui.hpHTML() 用整数比较给每个亮着的点写 green/orange/red class，
+   .pip.on 无后缀仍保留绿色作为兜底（选将界面 / 旧调用）。 */
+.hero-hp .pip.on        { background: radial-gradient(circle at 35% 30%, #a8edaa, #3f9a55); box-shadow: 0 0 5px rgba(110,220,130,.65); }
+.hero-hp .pip.on.green  { background: radial-gradient(circle at 35% 30%, #a8edaa, #3f9a55); box-shadow: 0 0 5px rgba(110,220,130,.65); }
+.hero-hp .pip.on.orange { background: radial-gradient(circle at 35% 30%, #ffdc95, #d9822b); box-shadow: 0 0 6px rgba(255,172,60,.75); }
+.hero-hp .pip.on.red    { background: radial-gradient(circle at 35% 30%, #ffb7ab, #c33b2b); box-shadow: 0 0 6px rgba(255,84,64,.8); }
+.hero-hp .pip.off { background: rgba(20,20,20,.65); opacity: .7; }
+.hero-hp .hp-num {
+  position: absolute; top: -13px; left: -1px;
+  z-index: 4;                  /* ★ 名字固定字号后可能与 x/y 区交叠，保证体力文字在上层可读 */
+  font-size: clamp(8px, 1.2vh, 10px);
+  color: #f0dcae;
+  white-space: nowrap;
+  text-shadow: 0 1px 2px #000, 0 0 5px rgba(0,0,0,.9);
+}
+/* ================= 角色信息浮层 =================
+   鼠标悬停或点击角色框时显示；hover 由 CSS，点击由 .info-open class。
+   pointer-events:none 保证浮层不遮挡「点角色框选目标」等原有交互。 */
+.hero-info {
+  position: absolute;
+  width: max-content;
+  max-width: clamp(190px, 28vw, 340px);
+  padding: clamp(6px, 1.1vh, 10px) clamp(8px, 1.2vw, 14px);
+  z-index: 30;
+  pointer-events: none;
+  opacity: 0; visibility: hidden;
+  background: linear-gradient(180deg, rgba(30,23,16,.97), rgba(15,11,8,.98));
+  border: 1px solid rgba(217,178,106,.55);
+  border-radius: 6px;
+  box-shadow: 0 12px 30px rgba(0,0,0,.72);
+  color: var(--text);
+  font-size: clamp(10px, 1.6vh, 14px);
+  line-height: 1.55;
+  white-space: normal;
+  transition: opacity .16s ease-out, transform .16s ease-out, visibility .16s;
+}
+/* 对手卡在顶部 → 信息浮在框下方居中；自己卡在右下 → 浮在框上方靠右 */
+.foe .hero-info { top: calc(100% + 8px); left: 50%; transform: translate(-50%, 6px); }
+.self .hero-info { bottom: calc(100% + 8px); right: 0; transform: translateY(6px); }
+.hero-card:hover .hero-info,
+.hero-card.info-open .hero-info { opacity: 1; visibility: visible; }
+/* ★ 目标选择期间：点角色框只用来选目标，连 hover 也不弹介绍，
+   避免浮层盖住金色高亮 / 挡住视线（由 ui.render 打 selecting-target 类）。 */
+#app.selecting-target .hero-info {
+  opacity: 0 !important; visibility: hidden !important;
+}
+.hero-card.foe:hover .hero-info,
+.hero-card.foe.info-open .hero-info { transform: translate(-50%, 0); }
+.hero-card.self:hover .hero-info,
+.hero-card.self.info-open .hero-info { transform: translateY(0); }
+.hi-head { color: var(--gold); font-size: 1.18em; font-weight: 800; letter-spacing: 1px; }
+.hi-title { color: var(--muted); font-weight: 400; font-size: .82em; margin-left: 6px; }
+.hi-meta {
+  color: var(--muted);
+  margin: 2px 0 4px; padding-bottom: 5px;
+  border-bottom: 1px solid rgba(217,178,106,.28);
+}
+/* ★ 技能之间要换行：每个技能独占一块，技能名与描述各占一行 */
+.hi-skill { display: block; margin-top: 6px; }
+.hi-skill + .hi-skill {
+  border-top: 1px dashed rgba(217,178,106,.22);
+  padding-top: 6px;
+}
+.hi-sname { color: #f0cf82; font-weight: 700; }
+.hi-sdesc { color: var(--text); opacity: .92; }
+
+/* ================= 行动顺序序号 =================
+   主公为「一」，其余玩家按逆时针。1v1 时容器为空 → 不占位、不显示。
+   其他玩家（AI）：框外下方居中；自己：框内下方居中。 */
+.hero-seat-out, .hero-seat-in {
+  font-size: clamp(9px, 1.4vh, 12px);
+  font-weight: 700;
+  color: #f0dcae;
+  text-shadow: 0 1px 3px rgba(0,0,0,.9);
+  white-space: nowrap;
+  z-index: 3;
+}
+.hero-seat-out:empty, .hero-seat-in:empty { display: none; }
+.hero-seat-out {
+  position: absolute; top: calc(100% + 3px); left: 50%;
+  transform: translateX(-50%);
+  text-align: center;
+}
+.hero-seat-in {
+  position: absolute; bottom: 3px; left: 50%;
+  transform: translateX(-50%);
+  text-align: center;
+}
+
+/* ================= 对手手牌数 =================
+   不再显示牌背，只在角色卡左下角（体力圆点下方）直接写一个数字 */
+.hero-hand-count {
+  position: absolute; left: 5px; bottom: 3px;
+  min-width: 14px;
+  font-size: clamp(9px, 1.4vh, 12px);
+  font-weight: 700; line-height: 1;
+  color: #ffe1a6;
+  text-shadow: 0 1px 2px rgba(0,0,0,.95), 0 0 4px rgba(217,178,106,.35);
+  z-index: 3;
+}
+
+/* ================= 中央桌面 ================= */
+.table {
+  position: absolute;
+  top: var(--table-top);
+  bottom: auto;
+  height: var(--table-h);
+  left: 20vw; right: 24vw;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px dashed rgba(230, 214, 180, .28);
+  border-radius: 10px;
+  background: radial-gradient(ellipse at center, rgba(12,20,18,.20), rgba(12,20,18,.04));
+  z-index: 2;
+}
+/* 展示区：从左到右最多 5 张（阵亡弃置条目豁免），超宽时自动堆叠 */
+.table-card {
+  position: relative;
+  display: flex; align-items: center; justify-content: center;
+  gap: clamp(6px, 1vw, 12px);
+  width: 100%; height: 100%;
+  --show-overlap: 0px;
+}
+.table-card .show-item + .show-item { margin-left: var(--show-overlap); }
+.show-item {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: center;
+  transition: transform .35s ease, opacity .35s ease;
+}
+.show-item .card {
+  width: calc(var(--card-w) * .6);
+  height: calc(var(--card-h) * .6);
+  min-width: 0;
+  cursor: default;
+  pointer-events: none;
+}
+.show-item .card:hover { transform: none; }
+.show-item .card .cname { font-size: calc(var(--card-name-size) * .6); }
+.show-item .card .corner { font-size: calc(var(--card-corner-size) * .6); top: 1px; left: 2px; }
+.show-item .card.trick .cname,
+.show-item .card.equip .cname { font-size: calc(var(--card-trick-name-size) * .6); }
+.show-item .as-label {
+  position: absolute; top: calc(100% + 1px); left: 50%;
+  transform: translateX(-50%);
+  font-size: clamp(8px, 1.2vh, 11px);
+  color: var(--gold); white-space: nowrap;
+  text-shadow: 0 1px 3px #000;
+}
+/* 阵亡弃置：牌照常进展示区，标签走统一的 .as-label，条目豁免 5 张上限 */
+.show-item.death-item { z-index: 2; }
+.show-item.enter { opacity: 0; transform: translateY(8px); }
+.show-item.slide-out {
+  z-index: 3; pointer-events: none;
+  animation: show-slide-out .36s ease-in forwards;
+}
+@keyframes show-slide-out {
+  to { transform: translateX(-140%); opacity: 0; }
+}
+
+/* ── 判定牌：亮出时的标签 + 生效 / 失效标记动画 ─────────────────
+   判定牌与改判后的判定牌都带 .judge-item；markJudgeResult 只给展示区
+   最后一张（即最终生效的那张）加 judge-ok / judge-fail。
+   生效 = 绿色对号 + 绿色「生效」，失效 = 红色叉号 + 红色「失效」。 */
+.show-item .judge-label {
+  position: absolute; top: calc(100% + 1px); left: 50%;
+  transform: translateX(-50%);
+  font-size: clamp(8px, 1.2vh, 11px);
+  color: #9fd8ff; white-space: nowrap;
+  text-shadow: 0 1px 3px #000;
+}
+.show-item.judge-ok::before,
+.show-item.judge-fail::before {
+  position: absolute; top: 8%; left: 50%;
+  z-index: 6;
+  font-size: clamp(30px, 6vh, 62px);
+  font-weight: 900;
+  line-height: 1;
+  transform-origin: 50% 60%;
+  pointer-events: none;
+  animation: judge-pop .5s cubic-bezier(.18,.9,.32,1.3) both;
+  text-shadow: 0 2px 10px rgba(0,0,0,.75), 0 0 14px currentColor;
+}
+.show-item.judge-ok::before   { content: '\2713'; color: #46d47a; }  /* ✓ */
+.show-item.judge-fail::before { content: '\2717'; color: #f05a5a; }  /* ✗ */
+.show-item.judge-ok::after,
+.show-item.judge-fail::after {
+  position: absolute; top: 60%; left: 50%;
+  z-index: 6;
+  transform: translateX(-50%);
+  font-size: clamp(11px, 2vh, 19px);
+  font-weight: 800;
+  letter-spacing: 3px;
+  white-space: nowrap;
+  pointer-events: none;
+  animation: judge-rise .42s ease-out .12s both;
+  text-shadow: 0 2px 8px rgba(0,0,0,.9), 0 0 10px currentColor;
+}
+.show-item.judge-ok::after   { content: '生效'; color: #46d47a; }
+.show-item.judge-fail::after { content: '失效'; color: #f05a5a; }
+@keyframes judge-pop {
+  0%   { opacity: 0; transform: translateX(-50%) scale(.2) rotate(-28deg); }
+  55%  { opacity: 1; transform: translateX(-50%) scale(1.28) rotate(9deg); }
+  100% { opacity: 1; transform: translateX(-50%) scale(1) rotate(0deg); }
+}
+@keyframes judge-rise {
+  0%   { opacity: 0; transform: translate(-50%, 12px); }
+  100% { opacity: 1; transform: translate(-50%, 0); }
+}
+
+/* 飞牌：从手牌区 / 角色框平滑移动到展示区（或手牌区最右） */
+.fly-card {
+  position: absolute;
+  z-index: 19;
+  pointer-events: none;
+  will-change: left, top;
+}
+.fly-card.moving {
+  /* ★ 出牌飞入展示区时，卡牌同时从手牌尺寸平滑缩到展示区的 0.6 倍，
+     落点就是它最终那一格，落地不再跳位。 */
+  transition: left .45s cubic-bezier(.22,.61,.36,1),
+              top  .45s cubic-bezier(.22,.61,.36,1),
+              width .45s cubic-bezier(.22,.61,.36,1),
+              height .45s cubic-bezier(.22,.61,.36,1),
+              opacity .2s ease;
+}
+/* 落地「溶接」：飞牌淡出的同时目标装备槽淡入，避免硬切闪一下 */
+.fly-card.landing { opacity: 0; }
+.fly-card .card {
+  width: 100%; height: 100%; min-width: 0;
+  cursor: default;
+  box-shadow: 0 12px 30px rgba(0,0,0,.6);
+}
+.fly-card .card:hover { transform: none; }
+/* 与 .show-item .card 同一套缩小字号，飞牌落地时文字尺寸也完全对齐 */
+.fly-card.to-showcase .card .cname { font-size: calc(var(--card-name-size) * .6); }
+.fly-card.to-showcase .card .corner {
+  font-size: calc(var(--card-corner-size) * .6); top: 1px; left: 2px;
+}
+.fly-card.to-showcase .card.trick .cname,
+.fly-card.to-showcase .card.equip .cname {
+  font-size: calc(var(--card-trick-name-size) * .6);
+}
+/* 摸牌叠放：逐张盖住 2/3 时，用描边 + 阴影让层次更清楚 */
+.fly-card.drawing .card {
+  box-shadow: 0 10px 22px rgba(0,0,0,.55), 0 0 0 1px rgba(217,178,106,.28);
+}
+/* ★「插入手牌」动画：旧牌 FLIP 平滑让位（transform 由 ui.js 内联驱动），
+   新牌真 DOM 在飞牌落地前用 visibility:hidden 隐藏，避免与飞牌重影。 */
+.card.flip-move { will-change: transform; }
+
+/* 牌背：back.webp 加载失败时回退到 CSS 绘制（与目标牌区面板同款金色牌背） */
+.card-back {
+  background:
+    radial-gradient(circle at 50% 42%, rgba(255,248,215,.9) 0%, rgba(240,214,145,.55) 32%, transparent 62%),
+    linear-gradient(165deg, #f2dca2 0%, #d9b46b 58%, #a9843e 100%);
+  box-shadow: 0 3px 9px rgba(0,0,0,.5), inset 0 0 0 2px rgba(255,240,195,.35);
+}
+.card-back::after { display: none; }
+.card-back .back-emblem {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: clamp(15px, 3vh, 26px);
+  color: rgba(110,75,30,.75);
+  text-shadow: 0 1px 0 rgba(255,245,210,.7);
+}
+.card-back.has-art { background: #241c17; }
+.card-back.has-art .back-emblem { display: none; }
+/* 引导 / 描述文字：移到展示区正下方，不再压在展示区卡牌上 */
+.hint {
+  position: absolute;
+  top: calc(var(--table-top) + var(--table-h) + clamp(4px, 1vh, 10px));
+  left: 20vw; right: 24vw;
+  z-index: 5;
+  text-align: center;
+  font-size: clamp(10px, 1.5vh, 13px);
+  line-height: 1.3;
+  color: #ffe6ae;
+  text-shadow: 0 1px 3px rgba(0,0,0,.9);
+  min-height: 14px;
+  pointer-events: none;
+}
+
+/* ================= 牌局记录（左下浮层） ================= */
+.log-box {
+  position: absolute;
+  left: 1vw;
+  top: var(--table-top);
+  width: clamp(120px, 18vw, 190px);
+  height: var(--table-h);
+  display: flex; flex-direction: column;
+  background: rgba(12, 9, 7, .78);
+  border: 1px solid rgba(217,178,106,.35);
+  border-radius: 6px;
+  overflow: hidden;
+  z-index: 4;
+}
+.log-title {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  font-size: clamp(9px, 1.3vh, 11px);
+  color: var(--gold);
+  background: linear-gradient(180deg, rgba(80,58,34,.9), rgba(48,34,22,.9));
+  border-bottom: 1px solid rgba(217,178,106,.3);
+  letter-spacing: 1px;
+}
+.log {
+  flex: 1; min-height: 0;
+  overflow-y: auto;
+  padding: 3px 7px;
+  font-size: clamp(9px, 1.25vh, 11px);
+  line-height: 1.5;
+  font-family: "SFMono-Regular", Consolas, "WenQuanYi Micro Hei", monospace;
+  scrollbar-width: thin;
+}
+.log .line { color: #cdbfa7; }
+.log .line.turn { color: var(--gold); font-weight: 700; }
+.log .line.sys { color: #7f9c86; }
+.log .line.sha { color: #e08a72; }
+.log .line.shan { color: #86b6d8; }
+.log .line.dmg { color: #e35b52; font-weight: 700; }
+.log .line.heal { color: #7fc98a; }
+.log .line.trick { color: #9fd8bd; font-weight: 700; }
+.log .line.warn { color: #c9a05a; }
+
+/* ================= 技能按钮位（自己角色框左侧一列，裸按钮无外框） =========
+   ★ 位置就是原来的位置：right = 角色框右距 + 框宽 + 间距，正好落在
+     #me-area 左侧那一列；bottom 与角色框同为 1vh，多个技能从下往上
+     在这同一列里竖排，不横向铺开、不挪到别处。 */
+/* 只保留定位：原先包围技能描述的外框 / 背景 / 阴影全部去掉，
+   技能名按钮直接浮在场景上（对应参考图「雷击 / 鬼道」裸按钮） */
+.skill-panel {
+  position: absolute;
+  right: calc(2.4vw + var(--hero-w));
+  bottom: 1vh;
+  width: clamp(72px, 9vw, 100px);
+  z-index: 6;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 0;
+}
+/* ★ 全部技能按钮：只在角色框左侧那一列竖排，每个按钮的 padding /
+   font-size / line-height 全部继承 .btn 默认，与原来只有一个技能按钮时
+   「一样大」—— 不因技能变多而缩小，也不改技能位的位置。 */
+.sp-actions { display: flex; flex-direction: column; gap: 4px; }
+.sp-actions .btn { width: 100%; }
+
+/* ================= 操作按钮 ================= */
+.actions {
+  position: absolute;
+  left: var(--hand-left); right: 25vw;
+  bottom: var(--actions-bottom);
+  min-height: 26px;
+  display: flex; gap: 6px; flex-wrap: wrap;
+  align-items: center; justify-content: center;
+  /* 高于五谷 / 目标牌区面板，保证嵌套询问（如五谷结算中的无懈）可点 */
+  z-index: 19;
+}
+
+/* ================= 玩家手牌 ================= */
+.hand-area {
+  position: absolute;
+  left: var(--hand-left); right: 25vw;
+  bottom: 1vh;
+  height: var(--hand-h);
+  display: flex; align-items: flex-end; justify-content: center;
+  z-index: 6;
+}
+.hand-area .count {
+  position: absolute; right: 4px; bottom: 2px;
+  z-index: 12;                 /* 始终压在手牌之上，不被卡牌遮住 */
+  pointer-events: none;
+  font-size: clamp(9px, 1.3vh, 11px);
+  color: #f0e2c6;
+  text-shadow: 0 1px 3px #000, 0 0 5px #000;
+  white-space: nowrap;
+}
+/* ★ 玩家判定区：不做任何面板 UI，图标直接贴在手牌区最左侧上方的背景上。
+   图标尺寸 = 基础尺寸的 3 倍；空判定区时完全不占位、不显示。 */
+.judge-area {
+  position: absolute;
+  left: var(--hand-left);
+  bottom: calc(1vh + var(--hand-h) + 6px);
+  z-index: 6;
+  display: flex; align-items: flex-end;
+  padding: 0;
+  background: none;
+  border: 0;
+  box-shadow: none;
+  pointer-events: none;
+}
+.judge-marks {
+  display: flex; align-items: flex-end;
+  gap: 9px;
+}
+/* 判定区图标：优先 assets/marks PNG；素材缺失时回退到单字标记 */
+.judge-mark {
+  flex: 0 0 auto;
+  width: clamp(16px, 2.3vh, 22px);
+  height: clamp(16px, 2.3vh, 22px);
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid rgba(217,178,106,.6);
+  border-radius: 4px;
+  background: #241c17;
+  box-shadow: 0 1px 4px rgba(0,0,0,.6);
+  overflow: hidden;
+}
+.judge-area .judge-mark {
+  width: clamp(48px, 6.9vh, 66px);
+  height: clamp(48px, 6.9vh, 66px);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.judge-mark img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.judge-mark.fallback {
+  font-size: clamp(9px, 1.4vh, 13px);
+  font-weight: 800;
+  color: #f0d79b;
+}
+.judge-area .judge-mark.fallback { font-size: clamp(27px, 4.2vh, 39px); }
+.hand {
+  display: flex; align-items: flex-end; justify-content: center;
+  gap: var(--hand-gap);
+  width: 100%;
+  padding-top: 10px;
+  --hand-overlap: 0px;
+}
+/* ★ 手牌 >8 张：按手牌区宽度由 ui.js 计算负 margin 自动叠放。
+   卡牌保持原尺寸不被 flex 压缩；后面的牌压在前面的牌上，
+   鼠标悬停 / 选中的牌提到最上层，保证仍可点选。 */
+.hand.stacked .card { flex: 0 0 auto; }
+.hand .card + .card { margin-left: var(--hand-overlap); }
+.hand .card:hover { z-index: 1; }
+.hand .card.sel, .hand .card.picked { z-index: 3; }
+
+/* ================= 玩家装备区（手牌区左侧，四条横栏） =================
+   总高度比手牌区略高（--equip-extra-h），每栏一条横条，只显示花色 /
+   点数 / 名称（武器写攻击范围、坐骑写加减距离），不使用图标。 */
+.equip-area {
+  position: absolute;
+  left: 1vw; bottom: 1vh;
+  width: var(--equip-w);
+  height: calc(var(--hand-h) + var(--equip-extra-h));
+  z-index: 6;
+  display: flex; flex-direction: column;
+  gap: clamp(2px, .45vh, 5px);
+  padding: clamp(2px, .5vh, 5px);
+  background: rgba(10, 8, 6, .62);
+  border: 1px solid rgba(217,178,106,.30);
+  border-radius: 6px;
+  box-shadow: inset 0 0 14px rgba(0,0,0,.4);
+}
+.equip-slot {
+  flex: 1 1 0; min-height: 0;
+  display: flex; align-items: center;
+  gap: clamp(3px, .5vw, 7px);
+  padding: 0 clamp(3px, .5vw, 7px);
+  border-radius: 3px;
+  background: rgba(255,255,255,.035);
+  border: 1px solid rgba(255,255,255,.055);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.equip-slot.equipped {
+  background: linear-gradient(90deg, rgba(217,178,106,.18), rgba(217,178,106,.05));
+  border-color: rgba(217,178,106,.38);
+}
+/* ★ 贯石斧等「手牌 + 装备区」多选：装备被选中时与手牌共用上浮高亮反馈 */
+.equip-slot.clickable { cursor: pointer; }
+.equip-slot.selected {
+  background: linear-gradient(90deg, rgba(217,178,106,.42), rgba(217,178,106,.12));
+  border-color: var(--gold);
+  box-shadow: inset 0 0 0 1px rgba(255,225,150,.35), 0 0 10px rgba(217,178,106,.35);
+  transform: translateY(-3px);
+}
+/* 【丈八蛇矛】主动转化：武器栏可点，给出轻微金边 + 呼吸光晕提示 */
+.equip-slot.clickable { cursor: pointer; }
+.equip-slot.zhangba-ready {
+  border-color: rgba(120,220,160,.75);
+  box-shadow: inset 0 0 0 1px rgba(120,220,160,.25), 0 0 10px rgba(120,220,160,.25);
+  animation: zhangba-glow 1.8s ease-in-out infinite;
+}
+.equip-slot.zhangba-ready:hover { background: rgba(120,220,160,.14); }
+@keyframes zhangba-glow {
+  0%, 100% { box-shadow: inset 0 0 0 1px rgba(120,220,160,.22), 0 0 6px rgba(120,220,160,.18); }
+  50%      { box-shadow: inset 0 0 0 1px rgba(120,220,160,.45), 0 0 14px rgba(120,220,160,.4); }
+}
+.eq-hint {
+  margin-left: auto; flex: 0 0 auto;
+  font-size: clamp(7px, 1vh, 10px);
+  color: #8ee6b0; white-space: nowrap;
+  text-shadow: 0 1px 2px #000;
+}
+.eq-label {
+  flex: 0 0 auto;
+  min-width: 3.2em;
+  font-size: clamp(8px, 1.3vh, 12px);
+  font-weight: 700;
+  color: var(--gold);
+  text-shadow: 0 1px 2px #000;
+}
+.eq-corner {
+  flex: 0 0 auto;
+  font-size: clamp(8px, 1.25vh, 12px);
+  font-weight: 800;
+  letter-spacing: -.5px;
+}
+.eq-corner.red   { color: #e0705f; }
+.eq-corner.black { color: #d8cdb8; }
+.eq-name {
+  flex: 1 1 auto; min-width: 0;
+  font-size: clamp(9px, 1.45vh, 13px);
+  font-weight: 700;
+  color: #f4e7cd;
+  overflow: hidden; text-overflow: ellipsis;
+  text-shadow: 0 1px 2px #000;
+}
+.eq-note {
+  flex: 0 0 auto;
+  font-size: clamp(7px, 1.1vh, 10px);
+  color: #9fd6a8;
+  text-shadow: 0 1px 2px #000;
+}
+.eq-empty {
+  flex: 1 1 auto;
+  font-size: clamp(8px, 1.25vh, 12px);
+  color: rgba(226,214,190,.30);
+}
+
+/* ================= 其他角色：角色框下半部分的缩小版装备栏 =================
+   只列出已装备的槽，一件都没装时整块隐藏（.hero-equips.hidden）。
+   空间较窄，说明用简称（攻1 / 距+1 / 距-1），完整文字在玩家装备区里。 */
+.hero-equips {
+  position: absolute;
+  left: 30%; right: 2px; bottom: 2px;
+  z-index: 4;
+  display: flex; flex-direction: column;
+  gap: 1px;
+  padding: 1px 2px;
+  max-height: 52%;
+  overflow: hidden;
+  background: rgba(9, 7, 6, .80);
+  border: 1px solid rgba(217,178,106,.30);
+  border-radius: 3px;
+}
+.hero-equips.hidden { display: none !important; }
+.eq-mini-row {
+  display: flex; align-items: center; gap: 2px;
+  min-width: 0; white-space: nowrap;
+  line-height: 1.15;
+}
+.hero-equips .eq-corner { font-size: clamp(6px, .95vh, 9px); }
+.hero-equips .eq-name {
+  font-size: clamp(6px, .95vh, 9px);
+  font-weight: 600;
+}
+.hero-equips .eq-note {
+  font-size: clamp(6px, .9vh, 8px);
+  color: #a8dcaf;
+}
+/* ★ 装备落地「溶接」：飞牌淡出的同时，新装备栏轻微放大淡入，
+   不再是「飞牌消失 → 文字硬蹦出来」。由 ui.flyCard 在 onArrive 之后打类。 */
+.equip-slot.just-mounted,
+.eq-mini-row.just-mounted { animation: equip-mount .3s ease-out both; }
+@keyframes equip-mount {
+  from { opacity: 0; transform: scale(.9); }
+  to   { opacity: 1; transform: scale(1); }
+}
+/* 有装备时把竖排名字的下边界再抬高一点，避免与下半部分迷你装备栏叠字；
+   字号仍由 --name-fs 按新的可用高度自动缩小，不用写死倍率。 */
+.hero-card.has-equips { --name-extra-bottom: 22px; }
+
+/* ================= 卡牌 ================= */
+.card {
+  position: relative;
+  flex: 0 1 auto;
+  min-width: var(--card-min-w);
+  width: var(--card-w);
+  height: var(--card-h);
+  background: linear-gradient(165deg, #fcf6e8 0%, #efe3c8 62%, #dcc9a6 100%);
+  border: 0;                /* 卡牌不再有外边框；选中反馈仍由 .card.sel 的 outline 提供 */
+  border-radius: 5px;
+  cursor: pointer;
+  box-shadow: 0 3px 7px rgba(0,0,0,.45);
+  transition: transform .16s ease-out, box-shadow .16s ease-out, opacity .16s ease-out;
+  user-select: none;
+  overflow: hidden;
+}
+.card:hover { transform: translateY(-3px); }
+/* 下半部装饰色带：代替暂时未接入的插画素材 */
+.card::after {
+  content: "";
+  position: absolute; left: 3px; right: 3px; bottom: 3px;
+  height: 38%;
+  border-radius: 3px;
+  background:
+    repeating-linear-gradient(45deg, rgba(255,255,255,.14) 0 3px, transparent 3px 8px),
+    linear-gradient(180deg, rgba(120,96,64,.28), rgba(70,54,38,.42));
+  pointer-events: none;
+}
+.card .corner {
+  position: absolute; top: 2px; left: 3px;
+  display: flex; flex-direction: column; align-items: center;
+  font-size: var(--card-corner-size);
+  font-weight: 700;
+  line-height: 1.05;
+  z-index: 2;
+}
+.card .cname {
+  position: absolute; top: 8%; left: 0; right: 0;
+  text-align: center;
+  font-size: var(--card-name-size);
+  font-weight: 800;
+  z-index: 2;
+  text-shadow: 0 1px 0 rgba(255,255,255,.6);
+}
+.card.red, .card.red .corner { color: #b8322b; }
+.card.black, .card.black .corner { color: #26201b; }
+/* 丈八蛇矛「一红一黑」转化出的无色【杀】：中性蓝灰，区别于红 / 黑 */
+.card.colorless, .card.colorless .corner { color: #3d6475; }
+/* 锦囊 / 装备牌与基本牌完全同色同底；仅长牌名改用小字号横排，避免溢出卡面 */
+.card.trick .cname,
+.card.equip .cname {
+  top: 11%;
+  font-size: var(--card-trick-name-size);
+  letter-spacing: -.5px;
+  white-space: nowrap;
+}
+/* 选中态：出牌 / 技能选牌 / 弃牌三种选牌状态共用同一套高亮 */
+.card.sel {
+  transform: translateY(calc(0px - var(--sel-lift)));
+  outline: 2px solid var(--gold);
+  box-shadow: 0 8px 16px rgba(217,178,106,.55);
+  z-index: 2;
+}
+/* 「刚选中」动画：只加在本次新选的那张牌上，三种选牌模式完全一致；
+   弃牌换选时新牌播放同一动画，已选牌保持静态上浮，不会一起抖动。 */
+.card.picked { animation: card-pick .16s ease-out both; }
+@keyframes card-pick {
+  from { transform: translateY(0) scale(1); }
+  to   { transform: translateY(calc(0px - var(--sel-lift))) scale(1.02); }
+}
+.card.dim { opacity: .48; cursor: default; }
+.card.dim:hover { transform: none; }
+
+/* ================= 图片 UI（加载失败自动回退） =================
+   命名规则见 js/core.js 的 SGS.characterImageFile 注释与 js/cards.js 的 CARD_DEFS[].image。
+   ui.js 只对「预探测成功」的图片输出 <img> 并加 has-art 类；
+   任何加载错误都会移除 has-art 并隐藏 img，于是 CSS 绘制的卡面 /
+   角色框原样显示（回退）。体力、手牌数、身份、绿框、序号等动态
+   信息始终由 DOM 叠加，不依赖图片内容。 */
+.card-art, .hero-art, .pick-art {
+  display: block;
+  object-fit: cover;
+  pointer-events: none;
+}
+.card-art {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  z-index: 3;
+  opacity: 0;
+  transition: opacity .12s ease-out;
+}
+.card.has-art .card-art { opacity: 1; }
+.card.has-art { background: #efe3c8; }
+/* 只隐藏 CSS 绘制的牌名与下半部色带；点数 / 花色角标始终保留显示，
+   因为它们是牌面信息的一部分，图片模式下也要能看到。 */
+.card.has-art::after,
+.card.has-art .cname { display: none; }
+/* 图片模式下只把角标提到图片之上（.card-art 是 z-index:3）。
+   不加底色、不加外框、不覆盖文字颜色：颜色完全沿用
+   .card.red .corner / .card.black .corner 的红 / 黑规则，
+   与没有图片 UI 时一模一样（有颜色、无边框、非纯白）。 */
+.card.has-art .corner { z-index: 4; }
+
+.hero-art {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  border-radius: 4px;
+  z-index: 0;
+  display: none;   /* 仅 has-art 时显示，加载失败不会露出破图 */
+}
+.hero-card.has-art .hero-art { display: block; }
+.hero-card.has-art { background: #14100d; }
+/* ★ 图片素材铺满后只撤掉 CSS 暗纹；势力图标、竖排名字、体力圆点等
+   动态信息仍由 DOM 叠加显示（z-index 高于 .hero-art 的 0）。 */
+.hero-card.has-art::before { display: none; }
+.hero-hp, .hero-q, .hero-hand-count { z-index: 3; }
+
+.char-card .avatar { position: relative; overflow: hidden; }
+.char-card .avatar .pick-art {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  border-radius: 50%;
+  opacity: 0;
+  transition: opacity .12s ease-out;
+}
+.char-card .avatar.has-art .pick-art { opacity: 1; }
+.char-card .avatar.has-art .avatar-txt { display: none; }
+
+/* ================= 目标选择 / 黄色直线 / 目标牌区面板 ================= */
+/* 合法目标角色卡：金色脉冲高亮，点击后确定目标 */
+.hero-card.targetable {
+  cursor: pointer;
+  border-color: var(--gold);
+  animation: target-pulse 1.1s ease-in-out infinite;
+}
+@keyframes target-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(217,178,106,.45), 0 0 14px rgba(255,210,90,.35), 0 6px 18px rgba(0,0,0,.5); }
+  50%      { box-shadow: 0 0 0 3px rgba(255,225,130,.85), 0 0 26px rgba(255,210,90,.70), 0 6px 18px rgba(0,0,0,.5); }
+}
+
+/* ★ 多目标选择（借刀杀人 / 铁索连环 / 方天画戟…）的「已选目标」：
+   静止常亮的青绿高亮 + 右上角点击序号，不再跟着合法目标的金色脉冲
+   一起跳动，与尚未选择的目标一眼可分。
+   · animation:none 用 !important 压过 .hero-card.targetable 的 target-pulse
+     （铁索 / 方天里已选目标仍在合法目标列表内，两个类会同时存在）
+   · 借刀杀人选完第一人后合法目标会切换，第一人即使不再 targetable，
+     仍靠这条规则保持静态高亮，不会「选完就看不见」 */
+.hero-card.target-picked {
+  animation: none !important;
+  border-color: #7fe3c0;
+  box-shadow:
+    0 0 0 3px rgba(127,227,192,.78),
+    0 0 22px rgba(127,227,192,.55),
+    0 6px 18px rgba(0,0,0,.55),
+    inset 0 0 22px rgba(127,227,192,.16);
+  z-index: 7;
+}
+.hero-card.target-picked::after {
+  content: attr(data-target-order);
+  position: absolute;
+  top: -10px; right: -10px;
+  box-sizing: border-box;
+  width: 22px; height: 22px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  background: #1d5c50;
+  border: 2px solid #a8f0da;
+  color: #fff;
+  font-size: 13px; font-weight: 800; line-height: 1;
+  box-shadow: 0 2px 8px rgba(0,0,0,.6);
+  z-index: 12;
+  pointer-events: none;
+}
+
+/* 目标连线：从选择方向目标方画出，再自选择方开始渐消失，全程 1.5s */
+.target-line {
+  position: absolute;
+  height: 3px;
+  z-index: 18;            /* 高于目标牌区面板，形成叠加效果 */
+  pointer-events: none;
+  transform-origin: 0 50%;
+  border-radius: 2px;
+  background: linear-gradient(90deg,
+    rgba(255,214,80,.25) 0%, #ffd24a 18%, #fff3b0 50%, #ffd24a 82%, rgba(255,214,80,.35) 100%);
+  box-shadow: 0 0 8px 2px rgba(255,205,60,.8), 0 0 20px 5px rgba(255,170,30,.35);
+  animation: target-line 1.5s ease-out forwards;
+}
+@keyframes target-line {
+  0%   { clip-path: inset(0 100% 0 0); opacity: 1; }  /* 自选择方向目标方生长 */
+  22%  { clip-path: inset(0 0 0 0);    opacity: 1; }  /* 完整连接双方 */
+  100% { clip-path: inset(0 0 0 100%); opacity: 0; }  /* 自选择方开始渐消失 */
+}
+
+/* 顺手牵羊 / 过河拆桥 的目标牌区面板（参考 OL 选牌界面，无红色读条） */
+.target-panel {
+  position: absolute;
+  left: 5vw; right: 5vw;
+  top: 16vh; bottom: 26vh;
+  z-index: 15;
+  background: linear-gradient(180deg, rgba(22,17,13,.88), rgba(14,11,9,.94));
+  border: 1px solid rgba(217,178,106,.28);
+  border-radius: 8px;
+  box-shadow: 0 18px 50px rgba(0,0,0,.6), inset 0 0 60px rgba(0,0,0,.35);
+  padding: clamp(6px, 1.2vh, 14px) clamp(10px, 2vw, 22px);
+  display: flex; flex-direction: column;
+  gap: clamp(4px, 1vh, 10px);
+  overflow: hidden;
+}
+.target-panel.hidden { display: none; }
+.tp-title {
+  flex: 0 0 auto;
+  text-align: center;
+  color: #f0cf82;
+  font-size: clamp(16px, 3.4vh, 28px);
+  font-weight: 800;
+  letter-spacing: 5px;
+  text-shadow: 0 2px 6px #000, 0 0 14px rgba(240,190,90,.5);
+}
+.tp-arrow { font-size: .55em; margin-left: 6px; color: #d9b26a; vertical-align: middle; }
+.tp-row {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex; align-items: stretch;
+  gap: clamp(6px, 1.2vw, 14px);
+  overflow: hidden;
+}
+.tp-label {
+  flex: 0 0 auto;
+  width: clamp(20px, 3vw, 32px);
+  writing-mode: vertical-rl; text-orientation: upright;
+  display: flex; align-items: center; justify-content: center;
+  font-size: clamp(10px, 1.7vh, 15px);
+  letter-spacing: 2px;
+  color: #3a2a18;
+  background: linear-gradient(180deg, #e8d7ad, #c9ae7d);
+  border-radius: 4px;
+  box-shadow: inset 0 0 6px rgba(90,70,40,.25);
+}
+.tp-cards, .tp-slots {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex; align-items: center; justify-content: center;
+  gap: clamp(4px, .9vw, 12px);
+}
+.tp-card {
+  --sel-lift: 8px;          /* 与手牌共用 card-pick 动画，但上浮幅度小一些 */
+  position: relative;
+  overflow: hidden;
+  flex: 0 1 auto;
+  height: min(100%, var(--card-h));
+  width: auto;
+  aspect-ratio: 5 / 7;
+  border-radius: 5px;
+  cursor: pointer;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(255,248,215,.9) 0%, rgba(240,214,145,.55) 32%, transparent 62%),
+    linear-gradient(165deg, #f2dca2 0%, #d9b46b 58%, #a9843e 100%);
+  box-shadow: 0 3px 9px rgba(0,0,0,.5), inset 0 0 0 2px rgba(255,240,195,.35);
+  display: flex; align-items: center; justify-content: center;
+  transition: transform .16s ease-out, box-shadow .16s ease-out;
+}
+/* 牌背图片：assets/cards/back.webp 加载成功时铺满，失败回退上面的 CSS 金色牌背 */
+.tp-card .tp-art {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
+  pointer-events: none;
+}
+.tp-card.has-art { background: #241c17; }
+.tp-card.has-art .tp-emblem { display: none; }
+.tp-card:hover { transform: translateY(-4px); }
+/* 【寒冰剑】：判定区的牌只展示、不可弃 */
+.tp-card.no-pick {
+  cursor: not-allowed;
+  opacity: .48;
+  filter: grayscale(.55);
+}
+.tp-card.no-pick:hover { transform: none; }
+.tp-card .tp-emblem {
+  font-size: clamp(15px, 3vh, 26px);
+  color: rgba(110,75,30,.75);
+  text-shadow: 0 1px 0 rgba(255,245,210,.7);
+}
+.tp-card.sel {
+  outline: 2px solid var(--gold);
+  transform: translateY(calc(0px - var(--sel-lift)));
+  box-shadow: 0 8px 18px rgba(217,178,106,.6);
+}
+.tp-card.picked { animation: card-pick .16s ease-out both; }
+.tp-slot {
+  flex: 1 1 0;
+  max-width: 18%;
+  height: min(100%, var(--card-h));
+  border-radius: 5px;
+  background: rgba(255,255,255,.045);
+  border: 1px solid rgba(255,255,255,.07);
+  color: rgba(226,214,190,.32);
+  font-size: clamp(9px, 1.5vh, 13px);
+  line-height: 1.5;
+  display: flex; align-items: center; justify-content: center;
+  text-align: center;
+}
+/* 装备区 / 判定区的明牌：所有角色都能看到，不用牌背。
+   ★ 直接铺「与展示区相同的原卡牌贴图」（ui.cardHTML）：贴图自带名称与
+     描述，这里只额外补花色 + 点数角标；图片加载失败自动回退 CSS 卡面。
+   仅作用于顺手牵羊 / 过河拆桥的面板，主战斗界面装备栏不受影响。
+   与手牌牌背一样可选中，共用 .tp-card.sel / picked 上浮动画。 */
+.tp-card.face-up {
+  background: #efe3c8;
+  box-shadow: 0 3px 9px rgba(0,0,0,.5);
+  padding: 0;
+  overflow: hidden;
+}
+/* 明牌按实际张数自然横排（与桃园结义一致），不再按四槽预留空位 */
+.tp-slots .tp-card.face-up { flex: 0 1 auto; max-width: none; }
+.tp-card.face-up .card {
+  width: 100%; height: 100%; min-width: 0;
+  border-radius: inherit;
+  box-shadow: none;
+  cursor: pointer;
+}
+.tp-card.face-up .card:hover { transform: none; }
+.tp-card.face-up .card .cname { font-size: calc(var(--card-name-size) * .55); }
+.tp-card.face-up .card.trick .cname,
+.tp-card.face-up .card.equip .cname { font-size: calc(var(--card-trick-name-size) * .55); }
+.tp-card.face-up .card .corner {
+  font-size: calc(var(--card-corner-size) * .62); top: 1px; left: 2px;
+}
+
+/* ★ 判定区（延时锦囊牌）：贴图逆时针旋转 90° 横置，容器按横卡 7:5 预留。
+   花色点数独立叠在**右上角**、水平可读，不跟着卡面躺倒（内部原角标隐藏）。 */
+.tp-card.delayed {
+  height: auto;
+  width: calc(var(--card-h) * .62);
+  aspect-ratio: 7 / 5;
+  max-width: none;
+}
+.tp-slots .tp-card.delayed { flex: 0 1 auto; max-width: none; }
+.tp-card.delayed .card {
+  position: absolute; top: 50%; left: 50%;
+  width: calc(var(--card-w) * .62);
+  height: calc(var(--card-h) * .62);
+  min-width: 0;
+  transform: translate(-50%, -50%) rotate(-90deg);
+}
+/* hover 时保持旋转，避免与上面的 .face-up .card:hover 冲突导致卡牌回正 */
+.tp-card.delayed .card:hover { transform: translate(-50%, -50%) rotate(-90deg); }
+.tp-card.delayed .card .corner { display: none; }
+.tp-corner {
+  position: absolute; top: 2px; right: 3px;
+  z-index: 5;
+  font-size: calc(var(--card-corner-size) * .62);
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+  /* 与展示区角标完全同款：红 / 黑纯文字，无底色、无边框、无描边 */
+}
+.tp-card.face-up.red .tp-corner   { color: #b8322b; }
+.tp-card.face-up.black .tp-corner { color: #26201b; }
+.tp-none {
+  font-size: clamp(9px, 1.5vh, 13px);
+  color: rgba(226,214,190,.35);
+}
+.tp-foot {
+  flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: center;
+  gap: 14px;
+  color: var(--muted);
+  font-size: clamp(10px, 1.6vh, 14px);
+}
+
+/* ================= 五谷丰登：独立选牌面板 =================
+   参考过河拆桥的目标牌区面板，但只保留一栏正面牌、从左到右平铺；
+   点击某张牌立即选择，无需确认按钮。 */
+.wugu-panel {
+  position: absolute;
+  left: 12vw; right: 12vw;
+  /* 下边缘给操作区留空：五谷结算中弹出无懈询问时按钮不会被面板盖住 */
+  top: 16vh;
+  bottom: calc(var(--actions-bottom) + 38px);
+  z-index: 16;
+  background: linear-gradient(180deg, rgba(26,20,14,.94), rgba(12,9,7,.96));
+  border: 1px solid rgba(217,178,106,.42);
+  border-radius: 10px;
+  box-shadow: 0 20px 60px rgba(0,0,0,.7), inset 0 0 50px rgba(0,0,0,.4);
+  padding: clamp(8px, 1.6vh, 18px) clamp(12px, 2vw, 26px);
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: clamp(6px, 1.4vh, 16px);
+  overflow: hidden;
+}
+.wugu-panel.hidden { display: none; }
+.wugu-title {
+  flex: 0 0 auto;
+  color: #f0cf82;
+  font-size: clamp(16px, 3.2vh, 26px);
+  font-weight: 800;
+  letter-spacing: 5px;
+  text-shadow: 0 2px 6px #000, 0 0 14px rgba(240,190,90,.5);
+}
+.wugu-sub {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: clamp(10px, 1.7vh, 15px);
+  letter-spacing: 1px;
+}
+.wugu-cards {
+  flex: 1 1 auto;
+  min-height: 0;
+  /* 给底部「轮到 xx 选牌」状态条留白，矮横屏也不与卡牌重叠 */
+  padding-bottom: clamp(10px, 2vh, 22px);
+  display: flex; align-items: center; justify-content: center;
+  gap: clamp(8px, 1.6vw, 22px);
+}
+/* ★ 五谷丰登底部状态条：规则层在每次【无懈可击】询问之前写入。
+   面板会盖住全局引导提示区，这条是玩家判断「要不要无懈当前目标」
+   的可见依据；绝对定位贴底，不改动上面标题 / 卡牌的原有居中布局。
+   静态显示，不做脉冲，避免和多目标选中态的跳动问题混淆。 */
+.wugu-turn {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  box-sizing: border-box;
+  z-index: 2;
+  display: flex; align-items: center; justify-content: center;
+  gap: 8px;
+  padding: clamp(6px, 1.2vh, 12px) clamp(12px, 2vw, 26px);
+  color: #f0cf82;
+  font-size: clamp(12px, 2vh, 18px);
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-shadow: 0 2px 5px #000;
+  background: linear-gradient(180deg, rgba(12,9,7,0), rgba(12,9,7,.92) 45%);
+  border-top: 1px solid rgba(217,178,106,.28);
+  pointer-events: none;   /* 不拦截点牌选牌 / 操作区按钮 */
+}
+.wugu-turn b { color: #ffe6a8; font-weight: 800; }
+.wugu-turn-dot {
+  flex: 0 0 auto;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: #ffd75e;
+  box-shadow: 0 0 10px rgba(255,215,94,.9);
+}
+.wugu-turn-idx {
+  margin-left: 6px;
+  color: var(--muted);
+  font-size: .74em;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+.wugu-card {
+  position: relative;
+  flex: 0 1 auto;
+  height: min(100%, var(--card-h));
+  aspect-ratio: 5 / 7;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: transform .16s ease-out, filter .16s ease-out;
+}
+.wugu-card:hover { transform: translateY(-10px) scale(1.04); filter: brightness(1.08); }
+.wugu-card .card {
+  width: 100%; height: 100%; min-width: 0;
+  box-shadow: 0 4px 14px rgba(0,0,0,.55);
+}
+.wugu-card .card:hover { transform: none; }
+/* 已被某角色拿走的牌：留在面板原位、置灰并盖一层说明，其他人不能再选 */
+.wugu-card.taken { cursor: default; }
+.wugu-card.taken .card { opacity: .42; filter: grayscale(.7); }
+.wugu-card.taken:hover { transform: none; filter: none; }
+.wugu-taken {
+  position: absolute; left: -8px; right: -8px; top: 44%;
+  text-align: center;
+  color: #ffd98a;
+  font-size: clamp(9px, 1.35vh, 14px);
+  font-weight: 800;
+  letter-spacing: 1px;
+  white-space: nowrap;
+  text-shadow: 0 2px 5px #000, 0 0 9px #000;
+  pointer-events: none;
+}
+
+/* ================= 【火计·火攻】查看目标手牌面板 =================
+   卧龙诸葛改写后的【火攻】：使用者查看目标全部手牌，自己挑一张展示。
+   面板里的牌是正面（原卡牌贴图 + 花色点数，不用牌背），点选只指定展示、
+   不拿走牌；确认按钮在手牌上方操作区。旧的牌堆顶控顶面板已移除。 */
+.peek-panel {
+  position: absolute;
+  left: 12vw; right: 12vw;
+  top: 15vh;
+  bottom: calc(var(--actions-bottom) + 34px);
+  z-index: 16;
+  background: linear-gradient(180deg, rgba(26,20,14,.95), rgba(12,9,7,.97));
+  border: 1px solid rgba(217,178,106,.5);
+  border-radius: 10px;
+  box-shadow: 0 20px 60px rgba(0,0,0,.75), inset 0 0 50px rgba(0,0,0,.4);
+  padding: clamp(8px, 1.6vh, 18px) clamp(12px, 2vw, 26px);
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: clamp(6px, 1.4vh, 14px);
+  overflow: hidden;
+}
+.peek-panel.hidden { display: none; }
+.peek-title {
+  flex: 0 0 auto;
+  color: #f0cf82;
+  font-size: clamp(15px, 3vh, 24px);
+  font-weight: 800; letter-spacing: 3px;
+  text-shadow: 0 2px 6px #000, 0 0 14px rgba(240,190,90,.5);
+}
+.peek-sub {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: clamp(10px, 1.6vh, 14px);
+  letter-spacing: 1px; text-align: center;
+}
+.peek-cards {
+  flex: 1 1 auto; min-height: 0;
+  display: flex; align-items: center; justify-content: center;
+  flex-wrap: wrap;
+  gap: clamp(6px, 1.2vw, 18px);
+}
+.peek-card {
+  position: relative;
+  flex: 0 1 auto;
+  height: min(100%, var(--card-h));
+  aspect-ratio: 5 / 7;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: transform .16s ease-out, filter .16s ease-out;
+}
+.peek-card:hover { transform: translateY(-8px) scale(1.03); filter: brightness(1.08); }
+.peek-card .card {
+  width: 100%; height: 100%; min-width: 0;
+  box-shadow: 0 4px 14px rgba(0,0,0,.55);
+  pointer-events: none;
+}
+.peek-card .card:hover { transform: none; }
+.peek-card.sel .card {
+  box-shadow: 0 0 0 3px var(--gold), 0 8px 22px rgba(232,196,106,.55);
+}
+.peek-card.picked { animation: card-pick .16s ease-out both; }
+.peek-badge {
+  position: absolute; left: 50%; bottom: -18px;
+  transform: translateX(-50%);
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--gold);
+  color: #241a10;
+  font-size: clamp(8px, 1.2vh, 12px);
+  font-weight: 800; white-space: nowrap;
+}
+
+/* ★「牌」= 手牌 + 装备区：技能选牌模式下，可参与转化的装备槽
+   给一层金边呼吸提示；选中时与手牌共用 .selected 高亮。 */
+.equip-slot.skill-ready {
+  border-color: rgba(240,200,110,.7);
+  box-shadow: inset 0 0 0 1px rgba(240,200,110,.25), 0 0 9px rgba(240,200,110,.22);
+}
+.equip-slot.skill-ready:hover { background: rgba(240,200,110,.12); }
+
+
+/* ================= 按钮 ================= */
+.btn {
+  background: linear-gradient(180deg, #3b2e23, #2a2019);
+  border: 1px solid var(--line);
+  color: var(--text);
+  padding: clamp(4px, .9vh, 8px) clamp(8px, 1.2vw, 14px);
+  border-radius: 5px;
+  font-size: clamp(10px, 1.45vh, 13px);
+  line-height: 1.2;
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+  transition: filter .15s, border-color .15s;
+}
+.btn:hover:not(:disabled) { border-color: var(--gold); filter: brightness(1.12); }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+.btn.primary {
+  background: linear-gradient(180deg, #a8452f, #742c20);
+  border-color: var(--gold);
+  color: #fff3dd;
+}
+.btn.skill {
+  background: linear-gradient(180deg, #6a5333, #43331f);
+  border-color: var(--gold);
+  color: #ffe9bd;
+  font-weight: 700;
+}
+/* ★ 当前条件下无法发动 / 被动锁定技：灰色占位，技能名仍完整显示 */
+.btn.skill.skill-off,
+.btn.skill:disabled {
+  background: linear-gradient(180deg, #3a3a38, #262624);
+  border-color: #55544f;
+  color: #aaa7a1;
+  opacity: .62;
+  box-shadow: none;
+  font-weight: 600;
+}
+.btn.skill.skill-off:hover { filter: none; border-color: #55544f; }
+.btn.tiny { padding: 3px 9px; font-size: clamp(9px, 1.25vh, 11px); }
+
+/* ================= 弹层（选将 / 结算） ================= */
+.overlay {
+  position: fixed; inset: 0; z-index: 20;
+  background: rgba(8, 6, 4, .9);
+  display: flex; align-items: center; justify-content: center;
+  padding: 10px;
+}
+.overlay.hidden { display: none; }
+.panel {
+  background: var(--panel-solid);
+  border: 1px solid var(--gold-dim);
+  border-radius: 12px;
+  padding: clamp(12px, 2.5vh, 24px) clamp(16px, 3vw, 32px);
+  max-width: min(760px, 92vw);
+  max-height: 94vh;
+  overflow-y: auto;
+  text-align: center;
+  box-shadow: 0 16px 50px rgba(0,0,0,.65);
+}
+.panel h2 { margin: 0 0 4px; color: var(--gold); letter-spacing: 2px; font-size: clamp(16px, 3vh, 24px); }
+.panel-sub, .panel-tip { color: var(--muted); font-size: clamp(10px, 1.5vh, 13px); line-height: 1.5; margin: 4px 0; }
+.panel-tip { color: var(--gold-dim); margin-top: 10px; }
+/* 旧选将卡片样式已移除：选将界面改用与局内同款的 .hero-card 角色框，
+   完整样式见文件末尾「选将界面」章节。 */
+.small-panel { max-width: 340px; }
+
+/* ================= 竖屏提示（手机默认横屏） ================= */
+.rotate-hint {
+  display: none;
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(10, 8, 6, .96);
+  flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px;
+  text-align: center;
+  padding: 24px;
+}
+.rot-icon {
+  width: 74px; height: 42px;
+  border: 3px solid var(--gold);
+  border-radius: 7px;
+  color: var(--gold);
+  font-size: 30px;
+  line-height: 36px;
+  transform: rotate(-90deg);
+  animation: rot-tip 1.8s ease-in-out infinite;
+}
+@keyframes rot-tip {
+  0%, 100% { transform: rotate(-90deg); }
+  50% { transform: rotate(0deg); }
+}
+.rot-title { font-size: 20px; color: var(--gold); letter-spacing: 3px; }
+.rot-sub { font-size: 13px; color: var(--muted); line-height: 1.6; }
+body.allow-portrait .rotate-hint { display: none !important; }
+@media (orientation: portrait) and (max-width: 768px) {
+  .rotate-hint { display: flex; }
+}
+
+/* 极矮横屏（如 320px 高）收紧间距 */
+@media (max-height: 360px) {
+  /* ★ 直接改 height 会让 --hero-h 与实际高度脱节，区间算错；同步覆盖变量 */
+  .hero-card {
+    height: 88px;
+    --hero-h: 88px;
+    --faction-fs: 10px; --pip-size: 7px; --pip-gap: 2px; --hp-bottom: 19px;
+  }
+  .hero-card.foe { top: 27px; }
+  :root { --table-top: 146px; --table-h: 66px; }
+  .actions { bottom: 84px; }
+  .hand-area { height: 62px; }
+  .card { height: 58px; width: 42px; }
+  :root { --equip-w: 92px; --equip-extra-h: 6px; }
+  .eq-label { font-size: 7px; min-width: 2.8em; }
+  .eq-corner { font-size: 7px; }
+  .eq-name { font-size: 8px; }
+  .eq-note, .eq-empty { font-size: 7px; }
+  .hero-equips .eq-corner, .hero-equips .eq-name, .hero-equips .eq-note { font-size: 6px; }
+}
+
+/* ================= 电脑端放大 =================
+   卡牌：长边在 ×1.5 基础上再 ×1.2（合计 ×1.8）；短边不再用独立倍率，
+        而是由长边按 5:7 推导，保证「长边 : 短边 = 7 : 5」严格成立。
+   角色框：长边保持 ×1.25 不变；短边同样由长边按 5:7 推导。
+   手牌区、操作区、卡内字号随长边同步 ×1.2；角色框内部固定尺寸不动
+   （长边没变）。手机端（<900px 或矮屏）沿用 :root 里的原尺寸。 */
+@media (min-width: 900px) and (min-height: 500px) {
+  :root {
+    /* 卡牌长边 = 90 / 31.5vh / 132 ×1.2 */
+    --card-h: clamp(108px, 37.8vh, 158.4px);
+    /* 短边 = 长边 × 5/7 → 长边:短边 = 7:5（长边不变，只改短边） */
+    --card-w: calc(var(--card-h) * 5 / 7);
+    --card-min-w: 61.2px;                            /* 51 ×1.2 */
+    --card-name-size: clamp(32.4px, 8.28vh, 46.8px);
+    --card-corner-size: clamp(16.2px, 2.7vh, 23.4px);
+    --card-trick-name-size: clamp(19.8px, 4.14vh, 27px);
+    --hand-h: clamp(118.8px, 39.6vh, 172.8px);      /* 99 / 33vh / 144 ×1.2 */
+    --hand-gap: clamp(3.6px, .99vw, 10.8px);
+    --actions-bottom: clamp(169.2px, 45vh, 237.6px);/* 141 / 37.5vh / 198 ×1.2 */
+    --sel-lift: 16.2px;
+
+    /* 角色框长边保持 ×1.25 不变，短边按 7:5 推导 */
+    --hero-h: clamp(117.5px, 32.5vh, 172.5px);      /* 94 / 26vh / 138 ×1.25 */
+    --hero-w: calc(var(--hero-h) * 5 / 7);
+    --table-top: clamp(190px, 46vh, 250px); /* 给变高的 AI 卡让位 */
+    /* 装备区宽度 ×1.2（与卡牌长边同步），高度仍比手牌区略高 */
+    --equip-w: clamp(124.8px, 19.2vw, 228px);
+    --equip-extra-h: clamp(9.6px, 1.92vh, 19.2px);
+  }
+  .hand { padding-top: 18px; }
+  /* 装备栏文字随卡牌字号同步 ×1.2 */
+  .eq-label { font-size: clamp(9.6px, 1.56vh, 14.4px); }
+  .eq-corner { font-size: clamp(9.6px, 1.5vh, 14.4px); }
+  .eq-name { font-size: clamp(10.8px, 1.74vh, 15.6px); }
+  .eq-note { font-size: clamp(8.4px, 1.32vh, 12px); }
+  .eq-empty { font-size: clamp(9.6px, 1.5vh, 14.4px); }
+  .hero-equips .eq-corner { font-size: clamp(7.5px, 1.14vh, 10.8px); }
+  .hero-equips .eq-name { font-size: clamp(7.5px, 1.14vh, 10.8px); }
+  .hero-equips .eq-note { font-size: clamp(7px, 1.08vh, 9.6px); }
+  .card::after { left: 5.4px; right: 5.4px; bottom: 5.4px; }
+  .card .corner { top: 3.6px; left: 5.4px; }
+
+  /* 角色框内部固定尺寸同步 ×1.25 */
+  .hero-q {
+    width: clamp(18.75px, 2.75vh, 22.5px); height: clamp(18.75px, 2.75vh, 22.5px);
+    font-size: clamp(11.25px, 1.75vh, 13.75px);
+  }
+  /* ★ 角色框内部固定尺寸 ×1.25：只覆盖区间参数，名字字号由
+     --name-fs（随 --hero-h 与可用高度）自动放大，无需写死数值。 */
+  .hero-card {
+    --hero-label-left: 6.25px;         /* ★ 与放大后的体力圆点列对齐 */
+    --faction-fs: clamp(12.5px, 2.125vh, 17.5px);
+    --pip-size: clamp(8.75px, 1.4375vh, 12.5px);
+    --pip-gap: 2.5px;
+    --hp-bottom: 23.75px;
+  }
+  .hero-hp { left: 6.25px; }
+  .hero-hp .hp-num { top: -16.25px; font-size: clamp(10px, 1.5vh, 12.5px); }
+  .hero-hand-count { left: 6.25px; bottom: 3.75px; font-size: clamp(11.25px, 1.75vh, 15px); }
+  .hero-seat-out, .hero-seat-in { font-size: clamp(11.25px, 1.75vh, 15px); }
+}
+
+/* ==========================================================
+   开局主界面 · 模式选择 —— 左侧竖排文字菜单
+   ----------------------------------------------------------
+   刻意不用「居中大字 + 四宫格卡片」那套参考图语言：
+     左栏是细长的文字菜单（01–04 序号 / 名称 / 描述 / 状态），
+     右侧整片留白，只展示氛围底图与一列竖排题字。
+   设计约定（给素材制作者）：
+     assets/backgrounds/background1.webp 只画氛围（山水 / 云纹 / 卡牌光效），
+     不要画按钮、文字、边框；建议 1920×1080 或更宽。
+     ★ 左半边会被菜单压住，重点画面建议放右侧 / 上方，四周留安全区。
+   适配：object-fit:cover 居中裁切铺满 → 不变形、无黑边、任意比例可用；
+        菜单由 DOM 布局，与图片尺寸完全解耦。
+   回退：图片缺失 / 失败时 .has-art 不生效，改为纯 CSS 水墨远山氛围。
+   ========================================================== */
+.mode-screen {
+  position: fixed; inset: 0; z-index: 30;
+  overflow: hidden;
+  background: #0e1826;
+  opacity: 1;
+  transition: opacity .3s ease;
+  font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+}
+.mode-screen.hidden { display: none; }
+.mode-screen.leaving { opacity: 0; pointer-events: none; }
+
+/* —— 背景层：cover 铺满，不变形、不留黑边 —— */
+.mode-bg-wrap { position: absolute; inset: 0; overflow: hidden; }
+.mode-bg {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: cover;             /* ★ 居中裁切：比例自适应，画面不拉伸变形 */
+  object-position: center center;
+  filter: brightness(.82) saturate(.9);
+  display: none;
+}
+.mode-bg-wrap.has-art .mode-bg { display: block; }
+
+/* 无图回退：水墨远山 + 雾气 + 星点，纯 CSS 绘制 */
+.mode-bg-wrap:not(.has-art) {
+  background:
+    radial-gradient(ellipse 45% 34% at 50% 12%, rgba(120,152,190,.30), transparent 74%),
+    radial-gradient(ellipse 80% 42% at 50% 96%, rgba(70,102,120,.34), transparent 76%),
+    linear-gradient(180deg, #101d30 0%, #1a2c43 40%, #16263a 72%, #0b1522 100%);
+}
+.mode-bg-wrap:not(.has-art)::before {
+  content: "";
+  position: absolute; left: -5%; right: -5%; bottom: 0; height: 52%;
+  background: linear-gradient(180deg, rgba(96,132,150,.30), rgba(10,20,32,.62));
+  clip-path: polygon(0 100%,0 58%,7% 44%,14% 62%,23% 30%,32% 66%,41% 44%,50% 70%,60% 34%,69% 62%,79% 42%,88% 66%,100% 48%,100% 100%);
+}
+.mode-bg-wrap:not(.has-art)::after {
+  content: "";
+  position: absolute; inset: 0;
+  background:
+    radial-gradient(1.5px 1.5px at 12% 18%, rgba(240,215,155,.55) 50%, transparent),
+    radial-gradient(1.5px 1.5px at 78% 14%, rgba(240,215,155,.45) 50%, transparent),
+    radial-gradient(1px 1px at 33% 9%, rgba(255,240,200,.5) 50%, transparent),
+    radial-gradient(1px 1px at 62% 22%, rgba(255,240,200,.4) 50%, transparent),
+    radial-gradient(1px 1px at 90% 30%, rgba(255,240,200,.35) 50%, transparent);
+  pointer-events: none;
+}
+
+/* 蒙版：左栏压暗保证文字清晰，右侧尽量透出背景图 */
+.mode-veil {
+  position: absolute; inset: 0; pointer-events: none;
+  background:
+    linear-gradient(90deg, rgba(6,12,22,.90) 0%, rgba(6,12,22,.74) 30%,
+                    rgba(6,12,22,.30) 56%, rgba(6,12,22,.08) 100%),
+    linear-gradient(180deg, rgba(6,12,22,.34) 0%, transparent 24%,
+                    transparent 76%, rgba(6,12,22,.44) 100%);
+}
+
+/* 右侧竖排题字：纯装饰 */
+.mode-side {
+  position: absolute; z-index: 1;
+  right: clamp(24px, 5.5vw, 92px); top: 50%;
+  transform: translateY(-50%);
+  display: flex; flex-direction: column; align-items: center;
+  gap: clamp(12px, 2.2vh, 24px);
+  writing-mode: vertical-rl;
+  color: rgba(230,214,180,.42);
+  font-family: "SGSHanYiWeiBei", "STKaiti", "KaiTi", serif;
+  font-size: clamp(13px, 1.6vw, 21px); letter-spacing: .42em;
+  text-shadow: 0 2px 10px rgba(0,0,0,.85);
+  pointer-events: none;
+  animation: mode-in 1s ease .5s both;
+}
+.mode-side i {
+  display: block; width: 1px; height: clamp(26px, 5vh, 58px);
+  background: linear-gradient(180deg, rgba(226,196,133,.55), transparent);
+}
+
+/* —— 左侧内容块：整体靠左、垂直居中 —— */
+.mode-content {
+  position: relative; z-index: 2;
+  width: min(560px, 52vw); height: 100%;
+  margin-left: clamp(28px, 7vw, 118px);
+  display: flex; flex-direction: column; justify-content: center;
+  box-sizing: border-box;
+  padding: clamp(16px, 3vh, 36px) 0;
+}
+
+.mode-kicker {
+  display: flex; align-items: center; gap: 10px;
+  font-size: clamp(9px, 1.05vw, 12px); letter-spacing: .28em;
+  color: rgba(226,196,133,.72);
+  animation: mode-in .65s ease .05s both;
+}
+.mode-kicker i {
+  display: block; width: clamp(20px, 3vw, 40px); height: 1px;
+  background: rgba(226,196,133,.65);
+}
+
+/* 标题：不再居中巨大金字，改为左对齐、克制的渐变金字 */
+.mode-title {
+  margin: clamp(6px, 1.4vh, 14px) 0 0;
+  font-family: "SGSHanYiWeiBei", "STKaiti", "KaiTi", "PingFang SC", serif;
+  font-size: clamp(34px, 4.6vw, 62px);
+  font-weight: 800; letter-spacing: .08em; line-height: 1.12;
+  background: linear-gradient(180deg, #fff3cf 0%, #f0cf82 45%, #c2953d 100%);
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent; color: #f0cf82;
+  filter: drop-shadow(0 2px 8px rgba(0,0,0,.8)) drop-shadow(0 0 18px rgba(226,178,90,.28));
+  animation: mode-in .7s cubic-bezier(.22,.61,.36,1) .12s both;
+}
+.mode-dash { opacity: .65; padding: 0 .02em; }
+
+.mode-rule {
+  display: flex; align-items: center; gap: 10px;
+  margin: clamp(10px, 2vh, 20px) 0 clamp(6px, 1.4vh, 14px);
+  color: rgba(226,196,133,.6); font-size: 9px;
+  animation: mode-in .7s ease .2s both;
+}
+.mode-rule i { display: block; height: 1px; background: linear-gradient(90deg, rgba(226,196,133,.55), rgba(226,196,133,.06)); }
+.mode-rule i:first-child { width: clamp(26px, 4vw, 56px); }
+.mode-rule i:last-child  { flex: 1; background: linear-gradient(90deg, rgba(226,196,133,.45), transparent); }
+
+/* —— 竖排文字菜单 —— */
+.mode-menu {
+  display: flex; flex-direction: column;
+  border-top: 1px solid rgba(226,196,133,.16);
+}
+.mode-item {
+  position: relative;
+  display: flex; align-items: center;
+  gap: clamp(12px, 1.8vw, 24px);
+  width: 100%;
+  min-height: clamp(58px, 9.6vh, 88px);
+  padding: clamp(8px, 1.4vh, 14px) clamp(8px, 1.2vw, 16px);
+  box-sizing: border-box;
+  border: 0; border-bottom: 1px solid rgba(226,196,133,.16);
+  border-radius: 0;
+  background: transparent;
+  color: inherit; font-family: inherit; text-align: left;
+  cursor: pointer;
+  transition: background .22s ease, padding-left .22s ease, transform .22s ease;
+  animation: mode-in .6s cubic-bezier(.22,.61,.36,1) both;
+}
+.mode-item:nth-child(1) { animation-delay: .26s; }
+.mode-item:nth-child(2) { animation-delay: .34s; }
+.mode-item:nth-child(3) { animation-delay: .42s; }
+.mode-item:nth-child(4) { animation-delay: .50s; }
+
+/* 序号：细体等宽感，开放项金色 */
+.mode-no {
+  flex: 0 0 auto; width: clamp(26px, 3vw, 38px);
+  font-family: "SGSHanYiWeiBei", "STKaiti", serif;
+  font-size: clamp(12px, 1.5vw, 18px); letter-spacing: .06em;
+  color: rgba(200,212,226,.42);
+  transition: color .22s ease;
+}
+.mode-text {
+  display: flex; flex-direction: column; gap: clamp(2px, .6vh, 7px);
+  min-width: 0; flex: 1 1 auto;
+}
+.mode-name {
+  font-family: "SGSHanYiWeiBei", "STKaiti", "KaiTi", serif;
+  font-size: clamp(19px, 2.5vw, 31px); font-weight: 700;
+  letter-spacing: .12em; line-height: 1.2;
+  color: rgba(224,231,240,.82);
+  text-shadow: 0 2px 8px rgba(0,0,0,.75);
+  transition: color .22s ease;
+}
+.mode-desc {
+  font-size: clamp(10px, 1.2vw, 14px);
+  color: rgba(200,212,226,.5); letter-spacing: .08em; line-height: 1.4;
+  transition: color .22s ease;
+}
+.mode-tag {
+  flex: 0 0 auto; white-space: nowrap;
+  font-size: clamp(9px, 1.1vw, 13px); letter-spacing: .12em;
+  color: rgba(200,212,226,.42);
+  transition: color .22s ease;
+}
+.mode-tag em { font-style: normal; display: inline-block; transition: transform .22s ease; }
+
+/* 开放项：左侧金色竖条 + 金字 + 箭头 */
+.mode-item.open::before {
+  content: ""; position: absolute; left: 0; top: 18%; bottom: 18%;
+  width: 2px; background: linear-gradient(180deg, transparent, #f0cf82 30%, #f0cf82 70%, transparent);
+  box-shadow: 0 0 10px rgba(240,205,125,.5);
+}
+.mode-item.open .mode-no,
+.mode-item.open .mode-tag { color: #f0cf82; }
+.mode-item.open .mode-name { color: #f6d98f; }
+.mode-item.open .mode-desc { color: rgba(226,214,190,.72); }
+.mode-item.open:hover, .mode-item.open:focus-visible {
+  background: linear-gradient(90deg, rgba(240,205,125,.10), rgba(240,205,125,0));
+  padding-left: calc(clamp(8px, 1.2vw, 16px) + 8px);
+}
+.mode-item.open:hover .mode-tag em { transform: translateX(6px); }
+
+/* 未开放：整体压暗，hover 只轻微提亮，不上浮不加金 */
+.mode-item.locked .mode-name { color: rgba(190,202,216,.58); }
+.mode-item.locked .mode-desc { color: rgba(180,194,210,.36); }
+.mode-item.locked:hover, .mode-item.locked:focus-visible {
+  background: linear-gradient(90deg, rgba(180,195,215,.06), transparent);
+  padding-left: calc(clamp(8px, 1.2vw, 16px) + 4px);
+}
+.mode-item.locked:hover .mode-name { color: rgba(214,224,236,.78); }
+.mode-item:active { transform: scale(.995); }
+
+.mode-foot {
+  margin: clamp(10px, 2vh, 20px) 0 0;
+  font-size: clamp(9px, 1.1vw, 13px); letter-spacing: .14em;
+  color: rgba(200,210,224,.46);
+  animation: mode-in .7s ease .58s both;
+}
+
+@keyframes mode-in {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+/* 侧边题字用 translateY(-50%) 定位，入场动画不能覆盖它的 transform */
+.mode-side { animation-name: mode-side-in; }
+@keyframes mode-side-in {
+  from { opacity: 0; transform: translateY(calc(-50% + 16px)); }
+  to   { opacity: 1; transform: translateY(-50%); }
+}
+
+/* 「暂未开放」轻提示 */
+.mode-toast {
+  position: absolute; left: 50%; bottom: clamp(18px, 5vh, 52px);
+  transform: translate(-50%, 12px); z-index: 3;
+  padding: clamp(9px, 1.5vh, 15px) clamp(18px, 2.6vw, 30px);
+  border: 1px solid rgba(226,196,133,.6); border-radius: 8px;
+  background: rgba(14,20,30,.95);
+  color: #f0cf82; font-size: clamp(12px, 1.8vh, 18px); letter-spacing: .1em;
+  box-shadow: 0 14px 38px rgba(0,0,0,.6), inset 0 0 20px rgba(226,196,133,.08);
+  opacity: 0; pointer-events: none; white-space: nowrap;
+  transition: opacity .24s ease, transform .24s ease;
+}
+.mode-toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+/* —— 矮横屏：收紧行高与字号，保证一屏放得下 —— */
+@media (max-height: 520px) {
+  .mode-content { margin-left: clamp(20px, 5vw, 64px); padding: 8px 0; }
+  .mode-title { font-size: clamp(28px, 4vw, 44px); }
+  .mode-rule { margin: 6px 0 4px; }
+  .mode-item { min-height: clamp(44px, 13vh, 62px); padding: 5px 10px; gap: 12px; }
+  .mode-name { font-size: clamp(16px, 2vw, 22px); }
+  .mode-foot { display: none; }
+  .mode-side { font-size: 13px; }
+}
+
+/* —— 竖屏 / 近方形：左栏改为居中通栏，侧边题字隐藏 —— */
+@media (max-aspect-ratio: 1/1) {
+  .mode-veil {
+    background:
+      linear-gradient(180deg, rgba(6,12,22,.66), rgba(6,12,22,.44) 45%, rgba(6,12,22,.78)),
+      radial-gradient(ellipse 80% 60% at 50% 50%, transparent 30%, rgba(5,10,18,.5) 100%);
+  }
+  .mode-side { display: none; }
+  .mode-content {
+    width: min(520px, 90vw); margin-left: 0;
+    align-items: stretch; justify-content: center;
+    padding: 0 clamp(16px, 4vw, 32px);
+  }
+  .mode-title { font-size: clamp(34px, 8vw, 56px); }
+  .mode-item { min-height: clamp(58px, 8vh, 78px); }
+}
+
+
+/* ==========================================================
+   选将界面：与局内完全同款的角色框
+   ----------------------------------------------------------
+   · 每个武将一张 .hero-card.pick-hero，复用局内的立绘 / 势力纯文字 /
+     竖排名字 / 体力圆点 + x/y / 角色信息浮层（技能逐条换行）。
+   · 框下方一枚「选择此将」按钮；hover 或点击框显示角色信息。
+   · 背景 assets/backgrounds/background2.webp 只做氛围，cover 铺满，
+     加载失败回退纯 CSS 水墨远山。
+   · ★ 放在所有媒体查询之后，保证 .pick-hero 覆盖 .hero-card 的尺寸参数。
+   ========================================================== */
+.start-screen.overlay {
+  background: #0e1826;
+  padding: 0;
+}
+.start-bg-wrap { position: absolute; inset: 0; overflow: hidden; }
+.start-bg {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: cover; object-position: center center;
+  filter: brightness(.8) saturate(.9);
+  display: none;
+}
+.start-bg-wrap.has-art .start-bg { display: block; }
+.start-bg-wrap:not(.has-art) {
+  background:
+    radial-gradient(ellipse 48% 38% at 50% 8%, rgba(120,152,190,.30), transparent 74%),
+    radial-gradient(ellipse 85% 44% at 50% 98%, rgba(70,102,120,.34), transparent 76%),
+    linear-gradient(180deg, #101d30 0%, #1a2c43 42%, #16263a 74%, #0b1522 100%);
+}
+.start-bg-wrap:not(.has-art)::before {
+  content: ""; position: absolute; left: -5%; right: -5%; bottom: 0; height: 50%;
+  background: linear-gradient(180deg, rgba(96,132,150,.30), rgba(10,20,32,.62));
+  clip-path: polygon(0 100%,0 58%,7% 44%,14% 62%,23% 30%,32% 66%,41% 44%,50% 70%,60% 34%,69% 62%,79% 42%,88% 66%,100% 48%,100% 100%);
+}
+.start-veil {
+  position: absolute; inset: 0; pointer-events: none;
+  background:
+    linear-gradient(180deg, rgba(6,12,22,.82) 0%, rgba(6,12,22,.42) 34%,
+                    rgba(6,12,22,.52) 72%, rgba(6,12,22,.88) 100%),
+    radial-gradient(ellipse 75% 65% at 50% 48%, transparent 38%, rgba(5,10,18,.5) 100%);
+}
+
+.start-content {
+  position: relative; z-index: 1;
+  width: 100%; height: 100%;
+  box-sizing: border-box;
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: flex-start;
+  gap: clamp(6px, 1.2vh, 14px);
+  padding: clamp(12px, 3vh, 30px) clamp(12px, 3vw, 36px);
+  text-align: center;
+}
+.start-kicker {
+  display: flex; align-items: center; gap: 10px;
+  font-size: clamp(9px, 1.05vw, 12px); letter-spacing: .26em;
+  color: rgba(226,196,133,.7);
+}
+.start-kicker i {
+  display: block; width: clamp(22px, 3vw, 44px); height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(226,196,133,.6));
+}
+.start-kicker i:last-child { transform: scaleX(-1); }
+.start-title {
+  margin: 0;
+  font-family: "SGSHanYiWeiBei", "STKaiti", "KaiTi", "PingFang SC", serif;
+  font-size: clamp(26px, 4.2vw, 50px);
+  font-weight: 800; letter-spacing: .12em; line-height: 1.15;
+  background: linear-gradient(180deg, #fff3cf 0%, #f0cf82 45%, #c2953d 100%);
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent; color: #f0cf82;
+  filter: drop-shadow(0 2px 8px rgba(0,0,0,.85)) drop-shadow(0 0 18px rgba(226,178,90,.3));
+}
+.start-sub {
+  margin: 0; font-size: clamp(10px, 1.35vw, 15px);
+  letter-spacing: .12em; color: rgba(214,222,232,.78);
+  text-shadow: 0 2px 8px rgba(0,0,0,.8);
+}
+.start-tip {
+  margin: 0; font-size: clamp(9px, 1.15vw, 13px);
+  letter-spacing: .1em; color: rgba(240,207,130,.78);
+  text-shadow: 0 2px 8px rgba(0,0,0,.8);
+  margin-top: auto;
+}
+
+/* —— 角色框横排 —— */
+.char-picker {
+  display: flex; align-items: flex-start; justify-content: center;
+  flex-wrap: wrap;
+  gap: clamp(10px, 1.8vw, 26px);
+  width: min(1120px, 96vw);
+  margin: clamp(8px, 1.8vh, 20px) 0;
+}
+.pick-slot {
+  position: relative;
+  display: flex; flex-direction: column; align-items: center;
+  gap: clamp(8px, 1.4vh, 14px);
+}
+/* hover / 点击固定信息时提到最上层，浮层不被相邻框盖住 */
+.pick-slot:hover, .pick-slot:focus-within { z-index: 12; }
+
+/* ★ 复用局内 .hero-card：只覆盖尺寸与定位参数，内部元素完全同款 */
+.pick-hero {
+  --hero-h: clamp(168px, 30vh, 232px);
+  --hero-w: calc(var(--hero-h) * 5 / 7);
+  --faction-fs: clamp(13px, 2.1vh, 18px);
+  --pip-size: clamp(9px, 1.5vh, 12px);
+  --pip-gap: 3px;
+  --hp-bottom: 26px;
+  --hero-label-left: 6px;
+  --name-top: calc(6px + var(--faction-fs) + 6px);
+  position: relative;              /* 覆盖局内的 absolute */
+  width: var(--hero-w); height: var(--hero-h);
+  cursor: pointer;
+  transition: transform .2s cubic-bezier(.22,.61,.36,1),
+              border-color .2s, box-shadow .2s;
+}
+.pick-hero .hero-hp { left: 6px; }
+.pick-hero .hero-hp .hp-num { top: -16px; font-size: clamp(9px, 1.4vh, 12px); }
+.pick-hero:hover, .pick-hero.info-open {
+  transform: translateY(-6px);
+  border-color: #ffe6a8;
+  box-shadow: 0 18px 40px rgba(0,0,0,.6), 0 0 26px rgba(240,205,125,.34),
+              inset 0 0 30px rgba(240,205,125,.14);
+}
+
+/* 下方选择按钮 */
+.pick-btn {
+  min-width: calc(var(--hero-w, 120px) + 12px);
+  padding: clamp(6px, 1.1vh, 11px) clamp(10px, 1.4vw, 18px);
+  border: 1px solid rgba(217,178,106,.65);
+  border-radius: 6px;
+  background: linear-gradient(180deg, rgba(72,52,32,.94), rgba(28,26,32,.94));
+  color: #f0cf82;
+  font-family: inherit;
+  font-size: clamp(11px, 1.5vh, 15px); letter-spacing: .12em;
+  cursor: pointer; white-space: nowrap;
+  box-shadow: 0 6px 16px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.07);
+  transition: transform .18s, border-color .18s, box-shadow .18s, background .18s;
+}
+.pick-btn em { font-style: normal; display: inline-block; transition: transform .18s; }
+.pick-btn:hover, .pick-btn:focus-visible {
+  transform: translateY(-2px);
+  border-color: #ffe6a8;
+  background: linear-gradient(180deg, rgba(96,68,36,.96), rgba(38,32,38,.96));
+  box-shadow: 0 10px 24px rgba(0,0,0,.5), 0 0 18px rgba(240,205,125,.28);
+}
+.pick-btn:hover em { transform: translateX(5px); }
+.pick-btn:active { transform: translateY(0) scale(.98); }
+
+/* 角色信息浮层：浮在框下方、选择按钮再下方 → 不遮住按钮。
+   显隐沿用全局 .hero-card:hover / .info-open 规则，这里只管定位与位移。 */
+.pick-hero .hero-info {
+  top: calc(100% + 52px); bottom: auto;
+  left: 50%; right: auto;
+  transform: translate(-50%, 6px);
+  max-width: clamp(210px, 26vw, 320px);
+  font-size: clamp(10px, 1.5vh, 13px);
+  text-align: left;
+}
+.pick-hero:hover .hero-info,
+.pick-hero.info-open .hero-info {
+  opacity: 1; visibility: visible;
+  transform: translate(-50%, 0);
+}
+
+/* —— 矮横屏：收紧标题与框，保证浮层仍在视口内 —— */
+@media (max-height: 560px) {
+  .start-kicker { display: none; }
+  .start-content { gap: 5px; padding-top: 8px; }
+  .start-title { font-size: clamp(20px, 3.2vh, 30px); }
+  .start-sub { font-size: 10px; }
+  .char-picker { margin: 6px 0; gap: 12px; }
+  .pick-hero {
+    /* 矮横屏也保留足够高度，名字不必缩字号、不与 x/y 挤在一起 */
+    --hero-h: clamp(140px, 31vh, 176px);
+    --faction-fs: clamp(11px, 1.8vh, 14px);
+    --pip-size: clamp(7px, 1.2vh, 10px);
+    --pip-gap: 2px;
+    --hp-bottom: 20px;
+    --name-top: calc(6px + var(--faction-fs) + 4px);
+  }
+  .pick-hero .hero-hp .hp-num { top: -14px; font-size: 9px; }
+  .pick-btn { padding: 5px 12px; font-size: 11px; }
+  .pick-hero .hero-info { top: calc(100% + 42px); font-size: 10px; }
+  /* 矮横屏空间紧：底部引导让位给信息浮层，避免重叠 */
+  .start-tip { display: none; }
+}
+/* —— 竖屏 / 近方形：允许换行，浮层收窄 —— */
+@media (max-aspect-ratio: 1/1) {
+  .start-content { justify-content: center; gap: 10px; }
+  .char-picker { width: min(620px, 94vw); }
+  .pick-hero { --hero-h: clamp(150px, 24vh, 200px); }
+  /* 竖屏换行后，浮层固定在屏幕底部，不再盖住下一行的角色框。
+     ★ hover 的 transform 会给 fixed 子元素创建 containing block，导致
+       「固定到视口」降级成「贴着角色框」；这里竖屏改用边框/光晕反馈，
+       取消 transform，浮层才真正落在视口底部。 */
+  .pick-hero:hover, .pick-hero.info-open { transform: none; }
+  .pick-hero .hero-info {
+    position: fixed;
+    top: auto; bottom: clamp(34px, 5vh, 62px);
+    left: 50%; right: auto;
+    max-width: min(340px, 90vw);
+  }
+  /* 底部引导让位给固定浮层，避免 hover 时被盖住半截 */
+  .start-tip { display: none; }
+  .start-content { padding-bottom: clamp(120px, 18vh, 180px); }
+}
+
+/* ==========================================================
+   战斗界面氛围底图 · assets/backgrounds/background3.webp
+   ----------------------------------------------------------
+   · 放在 #app 最前面，z-index:0 + pointer-events:none：不拦截任何点击，
+     所有角色框 / 手牌 / 按钮仍按原来的绝对定位与层叠工作。
+   · object-fit:cover 居中裁切铺满 → 不变形、无黑边、任意屏幕比例可用。
+   · 图片加载成功 → #app 加 .battle-art-on：显示图片 + 轻暗化蒙版，
+     并隐藏 #app::before / ::after 的 CSS 远山剪影 / 水面淡纹，
+     避免纹理叠在照片上发脏。
+   · 缺失 / 失败 / DOM 级 error → 撤掉 .battle-art-on 与 .has-art，
+     两层保持透明，完整回退到原来那套纯 CSS 青灰远景（一行不改）。
+   ========================================================== */
+.battle-bg-wrap {
+  position: absolute; inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.battle-bg {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: cover;              /* ★ 居中裁切：比例自适应，画面不拉伸变形 */
+  object-position: center center;
+  filter: brightness(.84) saturate(.92);
+  display: none;
+}
+.battle-bg-wrap.has-art .battle-bg { display: block; }
+
+/* 蒙版默认完全透明：只有确认图片加载成功才生效，回退态零影响 */
+.battle-veil {
+  position: absolute; inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: none;
+}
+#app.battle-art-on .battle-veil {
+  background:
+    linear-gradient(180deg, rgba(8,12,16,.34) 0%, rgba(8,12,16,.08) 26%,
+                    rgba(8,12,16,.10) 70%, rgba(8,12,16,.38) 100%),
+    radial-gradient(ellipse 62% 58% at 50% 46%, transparent 52%, rgba(5,9,14,.26) 100%);
+}
+/* 有图时收起 CSS 远景纹理；失败回退时这两条不生效，远山 / 水纹照常显示 */
+#app.battle-art-on::before,
+#app.battle-art-on::after { display: none; }
+
+/* 竖屏 / 矮横屏：cover 本身已自适应，这里只让蒙版更轻，避免小屏压得过暗 */
+@media (max-height: 520px), (max-aspect-ratio: 1/1) {
+  #app.battle-art-on .battle-veil {
+    background:
+      linear-gradient(180deg, rgba(8,12,16,.38), rgba(8,12,16,.10) 40%, rgba(8,12,16,.42));
+  }
+}
+
+
+/* ==========================================================
+   选将界面 · 势力筛选栏 + 搜索
+   ----------------------------------------------------------
+   · 工具栏是 start-content 里的静态 DOM，位于 #char-picker 之外：
+     过滤时只重建下方角色框，输入框不会失焦。
+   · 七个势力按钮复用 :root 里的势力字色做小色点，选中项金色高亮。
+   · 搜索可匹配显示名 / 完整名 / 介绍名 / 称号 / 势力 / 技能名与描述。
+   ========================================================== */
+.pick-tools {
+  display: flex; align-items: center; justify-content: center;
+  flex-wrap: wrap;
+  gap: clamp(8px, 1.4vw, 20px);
+  width: min(1120px, 96vw);
+  margin: clamp(2px, .8vh, 8px) 0 0;
+  padding: clamp(7px, 1.2vh, 12px) clamp(10px, 1.6vw, 20px);
+  box-sizing: border-box;
+  border: 1px solid rgba(217,178,106,.3);
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(20,29,42,.74), rgba(10,16,26,.8));
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 8px 24px rgba(0,0,0,.36);
+}
+
+/* —— 搜索框 —— */
+.pick-search {
+  display: flex; align-items: center; gap: 9px;
+  position: relative;
+  flex: 0 1 clamp(200px, 25vw, 290px);
+  height: clamp(30px, 4.2vh, 40px);
+  padding: 0 clamp(8px, 1vw, 12px);
+  box-sizing: border-box;
+  border: 1px solid rgba(217,178,106,.34);
+  border-radius: 7px;
+  background: rgba(6,12,20,.62);
+  cursor: text;
+  transition: border-color .18s ease, box-shadow .18s ease, background .18s ease;
+}
+.pick-search:focus-within {
+  border-color: #f0cf82;
+  background: rgba(10,17,27,.82);
+  box-shadow: 0 0 0 2px rgba(240,207,130,.16), 0 0 16px rgba(240,207,130,.22);
+}
+/* 纯 CSS 放大镜：不依赖字体图标 */
+.pick-search-ico {
+  position: relative; flex: 0 0 auto;
+  width: 11px; height: 11px;
+  border: 1.5px solid rgba(226,196,133,.8);
+  border-radius: 50%;
+}
+.pick-search-ico::after {
+  content: ""; position: absolute;
+  right: -5px; bottom: -3px;
+  width: 6px; height: 1.5px;
+  border-radius: 1px;
+  background: rgba(226,196,133,.8);
+  transform: rotate(45deg);
+}
+.pick-search-input {
+  flex: 1 1 auto; min-width: 0;
+  border: 0; outline: 0; background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: clamp(11px, 1.4vh, 14px);
+  letter-spacing: .04em;
+}
+.pick-search-input::placeholder { color: rgba(200,212,226,.45); }
+.pick-search-input::-webkit-search-cancel-button,
+.pick-search-input::-webkit-search-decoration { display: none; }
+.pick-search-clear {
+  display: none; flex: 0 0 auto;
+  width: 18px; height: 18px; padding: 0;
+  align-items: center; justify-content: center;
+  border: 0; border-radius: 50%;
+  background: rgba(200,212,226,.16);
+  color: #e8dfc9; font-size: 14px; line-height: 1;
+  cursor: pointer; font-family: inherit;
+  transition: background .16s, transform .16s;
+}
+.pick-search.has-query .pick-search-clear { display: flex; }
+.pick-search-clear:hover { background: rgba(240,207,130,.32); transform: rotate(90deg); }
+
+/* —— 势力按钮 —— */
+.pick-factions {
+  display: flex; align-items: center; justify-content: center;
+  flex-wrap: wrap;
+  gap: clamp(4px, .7vw, 9px);
+}
+.pf-btn {
+  --pf-c: var(--gold);
+  min-width: clamp(34px, 3.6vw, 44px);
+  padding: clamp(5px, 1vh, 9px) clamp(8px, 1vw, 13px);
+  border: 1px solid rgba(217,178,106,.22);
+  border-radius: 6px;
+  background: rgba(24,32,44,.72);
+  color: rgba(214,222,232,.74);
+  font-family: "SGSHanYiWeiBei", "STKaiti", "KaiTi", serif;
+  font-size: clamp(12px, 1.7vh, 17px);
+  letter-spacing: .06em;
+  cursor: pointer;
+  transition: transform .18s ease, border-color .18s ease,
+              color .18s ease, background .18s ease, box-shadow .18s ease;
+}
+/* 小色点：势力色与角色框左上角纯文字完全同一套变量 */
+.pf-btn::before {
+  content: ""; display: inline-block;
+  width: 5px; height: 5px; margin-right: 5px;
+  border-radius: 50%; vertical-align: middle;
+  background: var(--pf-c);
+  opacity: .55;
+  box-shadow: 0 0 5px var(--pf-c);
+  transition: opacity .18s;
+}
+.pf-btn[data-faction="魏"] { --pf-c: var(--wei); }
+.pf-btn[data-faction="蜀"] { --pf-c: var(--shu); }
+.pf-btn[data-faction="吴"] { --pf-c: var(--wu); }
+.pf-btn[data-faction="群"] { --pf-c: var(--qun); }
+.pf-btn[data-faction="晋"] { --pf-c: var(--jin); }
+.pf-btn[data-faction="神"] { --pf-c: var(--shen); }
+
+.pf-btn:hover, .pf-btn:focus-visible {
+  transform: translateY(-2px);
+  border-color: var(--pf-c);
+  color: #f4e6c8;
+  background: rgba(38,48,62,.86);
+}
+.pf-btn:hover::before { opacity: 1; }
+.pf-btn.active {
+  color: #fff3d6;
+  border-color: var(--pf-c);
+  background: linear-gradient(180deg, rgba(240,207,130,.24), rgba(240,207,130,.08));
+  box-shadow: 0 0 0 1px rgba(240,207,130,.18),
+              0 0 16px rgba(240,207,130,.24),
+              inset 0 0 14px rgba(240,207,130,.12);
+}
+.pf-btn.active::before { opacity: 1; }
+.pf-btn:active { transform: translateY(0) scale(.97); }
+
+/* —— 无匹配空态 —— */
+.pick-empty {
+  width: 100%;
+  display: flex; flex-direction: column; align-items: center;
+  gap: clamp(7px, 1.4vh, 14px);
+  padding: clamp(22px, 5vh, 54px) 20px;
+  text-align: center;
+}
+.pick-empty-mark {
+  font-size: clamp(22px, 3.4vh, 36px);
+  color: var(--gold);
+  text-shadow: 0 0 18px rgba(240,207,130,.6);
+  line-height: 1;
+}
+.pick-empty-title {
+  font-family: "SGSHanYiWeiBei", "STKaiti", "KaiTi", serif;
+  font-size: clamp(17px, 2.6vh, 26px);
+  letter-spacing: .12em; color: #f0cf82;
+  text-shadow: 0 2px 10px rgba(0,0,0,.8);
+}
+.pick-empty-sub {
+  font-size: clamp(10px, 1.4vh, 14px);
+  letter-spacing: .06em; color: rgba(200,212,226,.6);
+  line-height: 1.6;
+}
+.pick-reset {
+  margin-top: clamp(4px, 1vh, 10px);
+  padding: clamp(6px, 1.1vh, 11px) clamp(14px, 1.8vw, 22px);
+  border: 1px solid rgba(217,178,106,.65);
+  border-radius: 6px;
+  background: linear-gradient(180deg, rgba(72,52,32,.94), rgba(28,26,32,.94));
+  color: #f0cf82;
+  font-family: inherit;
+  font-size: clamp(11px, 1.5vh, 15px); letter-spacing: .12em;
+  cursor: pointer;
+  box-shadow: 0 6px 16px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.07);
+  transition: transform .18s, border-color .18s, box-shadow .18s;
+}
+.pick-reset em { font-style: normal; display: inline-block; transition: transform .18s; }
+.pick-reset:hover {
+  transform: translateY(-2px); border-color: #ffe6a8;
+  box-shadow: 0 10px 24px rgba(0,0,0,.5), 0 0 18px rgba(240,207,130,.28);
+}
+.pick-reset:hover em { transform: translateX(5px); }
+
+/* —— 矮横屏：工具栏收紧，保证角色框仍有足够高度 —— */
+@media (max-height: 560px) {
+  .pick-tools { padding: 5px 10px; gap: 8px; margin-top: 2px; }
+  .pick-search { height: 28px; flex-basis: clamp(170px, 22vw, 230px); }
+  .pick-search-input { font-size: 11px; }
+  .pf-btn { padding: 4px 9px; font-size: 12px; }
+}
+/* —— 竖屏 / 近方形：搜索框独占一行，势力按钮换行居中 —— */
+@media (max-aspect-ratio: 1/1) {
+  .pick-tools { width: min(560px, 94vw); }
+  .pick-search { flex: 1 1 100%; }
+  .pick-factions { width: 100%; }
+}
+
+/* 空态时底部「悬停角色框查看技能」不再适用：用 visibility 隐藏，
+   保留原有布局高度，切换筛选时界面不会上下跳动。 */
+.start-screen.pick-is-empty .start-tip { visibility: hidden; }
