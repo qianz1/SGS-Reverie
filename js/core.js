@@ -10,16 +10,26 @@
   /** 异步等待，用于让阶段流转与日志有可读的节奏 */
   SGS.sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  /** Fisher-Yates 洗牌（返回新数组，不改动入参） */
-  SGS.shuffle = function (arr) {
+  /**
+   * Fisher-Yates 洗牌（返回新数组，不改动入参）。
+   * rng 可注入：联机时由主机下发同一个随机源 / seed，保证两端算出
+   * 完全一致的座次与牌序；不传时行为与原来一样用 Math.random。
+   */
+  SGS.shuffleWith = function (arr, rng) {
     const a = arr.slice();
+    const rand = typeof rng === 'function' ? rng : Math.random;
     for (let i = a.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
+      const j = Math.floor(rand() * (i + 1));
       const t = a[i];
       a[i] = a[j];
       a[j] = t;
     }
     return a;
+  };
+
+  /** 默认洗牌入口：保持原有签名与行为（Math.random） */
+  SGS.shuffle = function (arr) {
+    return SGS.shuffleWith(arr, Math.random);
   };
 
   /** 自增 id 生成器 */
@@ -41,13 +51,51 @@
     { key: 'end',     name: '结束阶段' }
   ];
 
-  /**
-   * 行动顺序（座位号）：主公为「一」，其余玩家按逆时针依次「二、三…」。
-   * 当前 1v1 不显示序号；扩展到多人局时由 UI 读取 player.seat 渲染。
-   */
+  /** 座位号文字（一号位 = 先手），UI 读取 player.seat 渲染 */
   SGS.SEAT_LABELS = ['一', '二', '三', '四', '五', '六', '七', '八'];
   SGS.seatLabel = function (seat) {
     return SGS.SEAT_LABELS[seat - 1] || String(seat);
+  };
+
+  /**
+   * ★ 座次规则表：按「模式」分派 1..N 序号如何分配给场上角色。
+   *
+   * 目前只有 1v1 启用「随机分配」：生成 1..N 的序号洗牌后发给每个角色，
+   * 再按序号升序重排 players —— players[0] 即一号位（先手），不再恒为玩家。
+   *
+   * 2v2 / 斗地主 / 军争的排序规则各不相同（交错座次、地主固定一号位、
+   * 身份局按主公起算等），将来各加一条 rule 即可，绝不会误用 1v1 的洗牌。
+   * 未登记的 mode 一律「按给定顺序编号、不随机」，因此自测与未接入模式的
+   * 入口行为完全确定，不会因随机先手而偶发失败。
+   *
+   * @param {Array} players 场上角色
+   * @param {string} mode 模式 id
+   * @param {Function} [rng] 可注入随机源（联机主机同步 seed 时用）
+   * @returns {Array} 按座位号升序排列的行动顺序数组
+   */
+  SGS.SEAT_RULES = {
+    '1v1': function (list, rng) {
+      const n = list.length;
+      const seats = SGS.shuffleWith(
+        Array.from({ length: n }, (_, i) => i + 1), rng);
+      list.forEach((p, i) => { p.seat = seats[i]; });
+      return list.slice().sort((a, b) => a.seat - b.seat);
+    }
+  };
+
+  SGS.assignSeats = function (players, mode, rng) {
+    const list = players.slice();
+    const rule = mode && SGS.SEAT_RULES[mode];
+    if (typeof rule !== 'function') {
+      // 未登记模式：保持原顺序，只补序号（不偷偷随机、不重排）
+      list.forEach((p, i) => { if (!p.seat) p.seat = i + 1; });
+      return list;
+    }
+    const ordered = rule(list, rng);
+    ordered.forEach((p, i) => {
+      p.seat = Math.max(1, Number(p.seat) || i + 1);
+    });
+    return ordered;
   };
 
   /**

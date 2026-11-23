@@ -378,12 +378,51 @@
         });
       }
 
+      this.bindReadOnlyUI();
       this.bindArtEvents();
       this.probeArt();
       this.probeSkillFont();
       // 战斗 BGM：这里只建立实例 / preload，真正 play() 由选将后的用户手势启动
       try { if (SGS.Audio && SGS.Audio.init) SGS.Audio.init(); }
       catch (e) { /* 音频不可用不影响界面 */ }
+    }
+
+    /**
+     * ★ 只读 UI 的 JS 兜底：少数 WebView / 旧内核会无视 CSS 的
+     *   user-select:none，这里在 document 层再拦一次。
+     *
+     *   · selectstart：拖过标题 / 日志 / 角色框不会拉出蓝色选区
+     *   · dragstart  ：图片、卡牌不会被系统原生拖走或「另存为」
+     *   · contextmenu：只在图片与背景层上拦右键菜单（避免「复制图片 /
+     *     存储图像」），普通区域右键仍保留，不挡调试
+     *
+     *   输入控件（选将搜索框等）一律放行，保证仍可聚焦、输入、选中与粘贴。
+     *   卡牌点选 / 角色框点选 / 自己用 Pointer Events 实现的拖动排序
+     *   都不是这些事件，完全不受影响；无 DOM 的自测环境静默跳过。
+     */
+    bindReadOnlyUI() {
+      if (typeof document === 'undefined' ||
+          typeof document.addEventListener !== 'function') return;
+      const editable = (t) => {
+        if (!t || typeof t.closest !== 'function') return false;
+        try { return !!t.closest('input, textarea, [contenteditable="true"]'); }
+        catch (e) { return false; }
+      };
+      const block = (e) => {
+        if (!e || editable(e.target)) return;
+        if (typeof e.preventDefault === 'function') e.preventDefault();
+      };
+      document.addEventListener('selectstart', block);
+      document.addEventListener('dragstart', block);
+      document.addEventListener('contextmenu', (e) => {
+        const t = e && e.target;
+        if (!t || typeof t.closest !== 'function') return;
+        let onArt = false;
+        try {
+          onArt = !!t.closest('img, .mode-bg-wrap, .start-bg-wrap, .battle-bg-wrap');
+        } catch (err) { onArt = false; }
+        if (onArt && typeof e.preventDefault === 'function') e.preventDefault();
+      });
     }
 
     /**
@@ -1370,11 +1409,12 @@
       const aiJudge = $('ai-judge');
       if (aiJudge) aiJudge.innerHTML = this.judgeMarkHTML(ai);
 
-      // 行动顺序序号：主公为「一」，其余按逆时针（players 数组顺序）。1v1 无需标注，
-      // 只有多人局才显示；对手序号落在角色框外下方，自己的序号落在框内下方。
-      // 用数组下标兜底，将来往 players 里插入其他玩家时序号仍自动成立。
+      // 行动顺序序号：一号位先手，其余按逆时针（players 数组顺序）。
+      // ★ 1v1 座次随机后也显示，否则玩家看不出为什么这局是对手先动；
+      //   对手序号落在角色框外下方，自己的序号落在框内下方。
+      //   用数组下标兜底，将来往 players 里插入其他玩家时序号仍自动成立。
       const seatOf = (p) => p.seat || (game.players.indexOf(p) + 1);
-      const showSeats = game.players.length > 2;
+      const showSeats = game.players.length > 1;
       $('ai-seat').textContent = showSeats ? SGS.seatLabel(seatOf(ai)) : '';
       $('me-seat').textContent = showSeats ? SGS.seatLabel(seatOf(me)) : '';
 

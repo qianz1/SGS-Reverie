@@ -41,7 +41,9 @@
         //   文件缺失 / 浏览器拒绝都已在 Audio 层静默处理。
         try { if (SGS.Audio && SGS.Audio.startBgm) SGS.Audio.startBgm(); }
         catch (e) { /* 音频不可用不影响开局 */ }
-        const game = new SGS.Game(ui, charId);
+        // ★ 座次按模式分派：1v1 按场上人数随机分配 1..N 序号（谁是一号位谁先手）；
+        //   将来 2v2 / 斗地主 / 军争各自走 SEAT_RULES 里对应的规则。
+        const game = new SGS.Game(ui, charId, { mode: mode });
         ui.bindGame(game);
         ui.render(game);
         ui.refreshActions(); // 开局即点亮技能框与操作区占位

@@ -16,9 +16,15 @@
     /**
      * @param {SGS.UI} ui 界面对象
      * @param {string} humanCharId 玩家选择的角色 id，另一个角色自动分配给 AI
+     * @param {object} [opts] { mode, rng }
+     *   mode：座次规则的模式 id。'1v1' → 按场上人数随机分配 1..N 序号；
+     *         未登记 / 不传 → 保持给定顺序（自测与联机客机由主机指定座次）。
+     *   rng ：可注入随机源，联机时主机把同一 seed 发给两端，座次与牌序一致。
      */
-    constructor(ui, humanCharId) {
+    constructor(ui, humanCharId, opts) {
+      opts = opts || {};
       this.ui = ui;
+      this.mode = opts.mode || null;
       this.deck = new SGS.Deck();
 
       const chars = SGS.Characters;
@@ -29,13 +35,19 @@
 
       this.human = new SGS.Player(humanChar, true);
       this.aiPlayer = new SGS.Player(aiChar, false);
-      // players 数组即逆时针行动顺序：主公（玩家）为「一」，其余依次二、三…
-      // 扩展到多人局时，只需按逆时针座位顺序把其他玩家插入本数组，序号自动分配。
+      // players 数组即逆时针行动顺序，按座位号升序：一号位在下标 0。
+      // ★ 座次由模式规则分派：1v1 把 1..N 序号随机分配给场上角色，
+      //   所以先手可能是玩家也可能是 AI；human / aiPlayer 引用始终不变，
+      //   UI 仍按下=玩家、上=AI 布局，只是两者的座位号会互换。
+      //   未登记模式（含不传 opts 的自测入口）保持原顺序，结果完全确定。
       this.players = [this.human, this.aiPlayer];
-      this.players.forEach((p, i) => { p.seat = i + 1; });
+      if (typeof SGS.assignSeats === 'function') {
+        this.players = SGS.assignSeats(this.players, this.mode, opts.rng);
+      }
+      this.players.forEach((p, i) => { if (!p.seat) p.seat = i + 1; });
       this.ai = new SGS.AI(this);
 
-      this.current = 0;   // 0 = 玩家先手，1 = AI
+      this.current = 0;   // 0 = 一号位（先手），不再恒为玩家
       this.round = 1;
       this.phase = null;
       this.over = false;
@@ -455,6 +467,13 @@
       const h = this.human;
       const a = this.aiPlayer;
       if (SGS.log) {
+        // ★ 座次随机后必须让玩家看清谁是一号位、为什么是对手先动。
+        if (this.mode && this.players.length) {
+          const seats = this.players.map((p) =>
+            SGS.seatLabel(p.seat) + '号位 ' + p.name +
+            (p.isHuman ? '（你）' : '（AI）')).join('，');
+          SGS.log('本局座次：' + seats + '；' + this.actor.name + ' 先手。', 'turn');
+        }
         SGS.log(
           '对局开始：你【' + h.name + '·' + h.skill.name + '】 VS AI【' + a.name + '·' + a.skill.name + '】',
           'turn'
@@ -498,8 +517,9 @@
       if (SGS.log) SGS.log(p.name + ' 回合结束，展示区清空。');
       if (this.ui && typeof this.ui.clearTableCard === 'function') this.ui.clearTableCard();
 
-      // 回合切换：玩家 → AI → 玩家（双方各一回合算一轮）
-      this.current = 1 - this.current;
+      // 回合切换：按座次交给下一名角色；回到一号位即进入下一轮。
+      // 1v1 下等价于原来的 1-current，写成取模是为了将来多人局也成立。
+      this.current = (this.current + 1) % this.players.length;
       if (this.current === 0) this.round++;
       this.ui.render(this);
       await SGS.sleep(400);
