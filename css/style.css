@@ -2093,6 +2093,22 @@ body.allow-portrait .rotate-hint { display: none !important; }
 }
 .mode-toast.show { opacity: 1; transform: translate(-50%, 0); }
 
+/* —— 右下角署名 ——
+   纯文字、无框无底，低调压在氛围图上；层级低于 toast，短暂提示出现时
+   会被盖住也无所谓。pointer-events:none，不拦底下的任何点击。 */
+.mode-signature {
+  position: absolute; z-index: 2;
+  right: clamp(20px, 3.6vw, 60px);
+  bottom: clamp(16px, 3.4vh, 36px);
+  color: rgba(230, 214, 180, .52);
+  font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: clamp(12px, 1.45vw, 19px);
+  font-weight: 400; letter-spacing: .14em;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, .9), 0 0 22px rgba(0, 0, 0, .55);
+  white-space: nowrap; pointer-events: none;
+  animation: mode-in .8s ease .66s both;
+}
+
 /* —— 矮横屏：收紧行高与字号，保证一屏放得下 —— */
 @media (max-height: 520px) {
   .mode-content { margin-left: clamp(20px, 5vw, 64px); padding: 8px 0; }
@@ -2102,6 +2118,7 @@ body.allow-portrait .rotate-hint { display: none !important; }
   .mode-name { font-size: clamp(16px, 2vw, 22px); }
   .mode-foot { display: none; }
   .mode-side { font-size: 13px; }
+  .mode-signature { bottom: 9px; font-size: 11px; }
 }
 
 /* —— 竖屏 / 近方形：左栏改为居中通栏，侧边题字隐藏 —— */
@@ -2119,6 +2136,7 @@ body.allow-portrait .rotate-hint { display: none !important; }
   }
   .mode-title { font-size: clamp(34px, 8vw, 56px); }
   .mode-item { min-height: clamp(58px, 8vh, 78px); }
+  .mode-signature { right: 16px; bottom: 14px; font-size: 12px; }
 }
 
 
