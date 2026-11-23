@@ -20,21 +20,28 @@
      *   mode：座次规则的模式 id。'1v1' → 按场上人数随机分配 1..N 序号；
      *         未登记 / 不传 → 保持给定顺序（自测与联机客机由主机指定座次）。
      *   rng ：可注入随机源，联机时主机把同一 seed 发给两端，座次与牌序一致。
+     *   remoteCharId / remote：联机时第二个座位由远端玩家执掌，角色由
+     *         客机选定后下发；isRemote=true 让它走「远程 UI」而不是 AI。
+     *   uiRouter：联机时挂一个路由器，把所有 waitXXX 按决策者自动分发到
+     *         本地 UI 或远程 UI；其余展示方法原样转给本地 UI。规则层因此
+     *         完全不知道有网络，单机路径一行不变。
      */
     constructor(ui, humanCharId, opts) {
       opts = opts || {};
-      this.ui = ui;
+      this.localUI = ui;                       // 真实界面（主机自己看的）
+      this.ui = opts.uiRouter || ui;           // 决策入口（联机时被路由）
       this.mode = opts.mode || null;
       this.deck = new SGS.Deck();
 
       const chars = SGS.Characters;
       const humanChar = chars[humanCharId] || chars.zhangfei;
-      const aiChar = Object.keys(chars)
-        .map((k) => chars[k])
-        .find((c) => c.id !== humanChar.id) || chars.zhaoyun;
+      const aiChar = (opts.remoteCharId && chars[opts.remoteCharId]) ||
+        Object.keys(chars).map((k) => chars[k])
+          .find((c) => c.id !== humanChar.id) || chars.zhaoyun;
 
       this.human = new SGS.Player(humanChar, true);
       this.aiPlayer = new SGS.Player(aiChar, false);
+      if (opts.remote) this.aiPlayer.isRemote = true;
       // players 数组即逆时针行动顺序，按座位号升序：一号位在下标 0。
       // ★ 座次由模式规则分派：1v1 把 1..N 序号随机分配给场上角色，
       //   所以先手可能是玩家也可能是 AI；human / aiPlayer 引用始终不变，
@@ -57,6 +64,15 @@
 
     get actor() {
       return this.players[this.current];
+    }
+
+    /**
+     * ★ 这个座位的决策要不要「问人」：本地真人走本地 UI，远端玩家走
+     *   路由器转发的远程 UI，两者都挂起 Promise；只有纯 AI 才走 ai.askXXX。
+     *   单机时 isRemote 恒为 undefined，结果与原来逐字一致。
+     */
+    isDecider(player) {
+      return SGS.isDecider(player);
     }
 
     foeOf(player) {
@@ -160,7 +176,7 @@
     async selectTarget(user, card, targets) {
       if (!targets || !targets.length) return null;
       let target;
-      if (user.isHuman) {
+      if (SGS.isDecider(user)) {
         target = await this.ui.waitTarget(user, card, targets, this);
       } else {
         // AI 对「可选自己也可选别人」的牌（火攻）优先打对手
@@ -192,7 +208,7 @@
       if (mode === 'self') return targets && targets.length ? targets : [user];
       if (mode === 'borrow') {
         let picks = null;
-        if (user.isHuman) {
+        if (SGS.isDecider(user)) {
           if (this.ui && typeof this.ui.waitTargets === 'function') {
             picks = await this.ui.waitTargets(user, card, targets, this, 2);
           }
@@ -222,7 +238,7 @@
         const min = t.minTargets || 1;
         const max = t.maxTargets || 2;
         let picks = null;
-        if (user.isHuman) {
+        if (SGS.isDecider(user)) {
           if (this.ui && typeof this.ui.waitChainTargets === 'function') {
             picks = await this.ui.waitChainTargets(user, card, targets, this, min, max);
           }
@@ -702,7 +718,7 @@
       }
       if (SGS.log) SGS.log(p.name + '【出牌阶段】开始。');
 
-      if (p.isHuman) {
+      if (SGS.isDecider(p)) {
         // 玩家可反复出牌，直到主动结束出牌
         for (;;) {
           const act = await this.ui.waitPlay(p, this);
@@ -1300,7 +1316,7 @@
       });
       if (choice === 'discard') {
         let id = null;
-        if (target.isHuman && this.ui && typeof this.ui.waitPick === 'function') {
+        if (SGS.isDecider(target) && this.ui && typeof this.ui.waitPick === 'function') {
           id = await this.ui.waitPick(target, this, {
             need: 1, confirmLabel: '弃置',
             hint: '【雌雄双股剑】：点选一张手牌弃置。'
@@ -1332,7 +1348,7 @@
       opts = opts || {};
       const name = opts.name || '寒冰剑';
       let ids = null;
-      const useHandPick = !!opts.useHandPick && target.isHuman &&
+      const useHandPick = !!opts.useHandPick && SGS.isDecider(target) &&
         this.ui && typeof this.ui.waitPick === 'function';
       if (this.ui && typeof this.ui.waitTrickCard === 'function' && !useHandPick) {
         ids = await this.ui.waitTrickCard(this, user, target,
@@ -1457,7 +1473,7 @@
       let follow = candidates[0];
       let conv = this.shaConversionFor(attacker, follow) ||
         this.basicConversionFor(attacker, follow);
-      if (attacker.isHuman && this.ui && typeof this.ui.waitPick === 'function') {
+      if (SGS.isDecider(attacker) && this.ui && typeof this.ui.waitPick === 'function') {
         const canConvert = pool.some(
           (c) => !attacker.canUseAsSha(c) &&
             (!!this.shaConversionFor(attacker, c) ||
@@ -1583,7 +1599,7 @@
       let target;
       if (!chosenTarget && fangtianReady) {
         let picks = null;
-        if (attacker.isHuman) {
+        if (SGS.isDecider(attacker)) {
           if (this.ui && typeof this.ui.waitChainTargets === 'function') {
             picks = await this.ui.waitChainTargets(attacker, asCard, targets, this, 1, 3,
               '【方天画戟】这是你最后一张手牌，此【杀】可指定 1~3 名目标。点选后按【确认】。');
@@ -1975,7 +1991,7 @@
         multiTarget: !!ctx.multiTarget
       };
       let choice = null;
-      if (player.isHuman) {
+      if (SGS.isDecider(player)) {
         if (this.ui && typeof this.ui.waitWuXie === 'function') {
           choice = await this.ui.waitWuXie(player, this, opts);
         }
@@ -2102,7 +2118,7 @@
      */
     async askOptional(player, opts) {
       opts = opts || {};
-      if (player.isHuman) {
+      if (SGS.isDecider(player)) {
         if (this.ui && typeof this.ui.waitOptional === 'function') {
           return !!(await this.ui.waitOptional(player, this, opts));
         }
@@ -2120,7 +2136,7 @@
      */
     async askChoice(player, opts) {
       opts = opts || {};
-      if (player.isHuman) {
+      if (SGS.isDecider(player)) {
         if (this.ui && typeof this.ui.waitChoice === 'function') {
           return await this.ui.waitChoice(player, this, opts);
         }
@@ -2210,7 +2226,7 @@
         }
       }
 
-      if (target.isHuman) {
+      if (SGS.isDecider(target)) {
         const res = await this.ui.waitRespond(target, this, {
           need: need, reason: reason || '杀', armorNegated: armorNegated
         });
@@ -2372,7 +2388,7 @@
         if (!saves.length && !canConvert) break;
 
         let used = null;
-        if (target.isHuman) {
+        if (SGS.isDecider(target)) {
           used = await this.ui.waitBrink(target, saves, this);
         } else {
           used = await this.ai.brink(target);
@@ -2449,7 +2465,7 @@
       while (over() > 0 && guard++ < 8 && !this.over && p.hand.length) {
         const need = over();
         let ids;
-        if (p.isHuman) {
+        if (SGS.isDecider(p)) {
           ids = await this.ui.waitDiscard(p, need, this);
         } else {
           ids = this.ai.pickDiscards(p, need);

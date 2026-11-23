@@ -936,7 +936,8 @@
           if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
           const sc2 = $('start-screen');
           if (sc2 && sc2.classList) sc2.classList.add('hidden');
-          if (self._pickOnPick) self._pickOnPick(btn.dataset.id);
+          // ★ 联机：把当前联机会话一起交给启动回调；本地对战时为 null
+          if (self._pickOnPick) self._pickOnPick(btn.dataset.id, self._pickNetInfo || null);
         });
       });
     }
@@ -1352,12 +1353,18 @@
 
     render(game) {
       if (!game) return;
+      // ★ 联机钩子：主机每次状态渲染都推一次按座位裁剪的权威快照。
+      //   客机不设置此钩子，避免「收快照 → render → 再发快照」的循环。
+      if (this.onRender) { try { this.onRender(game); } catch (e) {} }
       const me = game.human;
       const ai = game.aiPlayer;
       const pd = this.pending;
 
-      $('round-info').textContent = '第 ' + game.round + ' 轮 · ' + (game.actor.isHuman ? '你的回合' : 'AI 回合');
-      $('deck-info').textContent = '牌堆 ' + game.deck.remaining + ' 张 / 弃牌 ' + game.deck.discardPile.length + ' 张';
+      $('round-info').textContent = '第 ' + game.round + ' 轮 · ' +
+        (game.actor.isHuman ? '你的回合'
+          : (game.vsAI === false ? '对手回合' : 'AI 回合'));
+      $('deck-info').textContent = '牌堆 ' + game.deck.remaining + ' 张 / 弃牌 ' +
+        (game.deck.discardPile ? game.deck.discardPile.length : 0) + ' 张';
 
       const side = (p, prefix) => {
         const faction = p.char.faction || '群';
@@ -2328,6 +2335,8 @@
       box.appendChild(line);
       while (box.children.length > 200) box.removeChild(box.firstChild);
       box.scrollTop = box.scrollHeight;
+      // ★ 联机钩子：把牌局记录同步给客机（客机自己不设此钩子）
+      if (this.onLog) { try { this.onLog(msg, cls); } catch (e) {} }
     }
 
     /* ---------------- 操作按钮 ---------------- */
@@ -3999,7 +4008,7 @@
       catch (e) { /* 静默 */ }
       $('result-text').textContent = win ? '🎉 你赢了！' : '💀 你输了';
       $('result-sub').textContent = win
-        ? 'AI 体力归零，对局结束。'
+        ? (this.vsAI === false ? '对手体力归零，对局结束。' : 'AI 体力归零，对局结束。')
         : '你的体力归零，再来一局吧。';
       $('result-screen').classList.remove('hidden');
     }

@@ -27,6 +27,16 @@
     return a;
   };
 
+  /**
+   * ★ 这个座位的决策要不要「问人」：本地真人 / 远端联机玩家都要挂起
+   *   Promise 等输入，只有纯 AI 才自动决策。
+   *   写成全局纯函数而不是只挂 Game.prototype：部分专项会把 Game 的方法
+   *   单独绑到普通对象上跑，那里没有 Game 实例方法可用。
+   */
+  SGS.isDecider = function (player) {
+    return !!(player && (player.isHuman || player.isRemote));
+  };
+
   /** 默认洗牌入口：保持原有签名与行为（Math.random） */
   SGS.shuffle = function (arr) {
     return SGS.shuffleWith(arr, Math.random);

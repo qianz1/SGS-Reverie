@@ -2634,3 +2634,94 @@ body.allow-portrait .rotate-hint { display: none !important; }
 /* 空态时底部「悬停角色框查看技能」不再适用：用 visibility 隐藏，
    保留原有布局高度，切换筛选时界面不会上下跳动。 */
 .start-screen.pick-is-empty .start-tip { visibility: hidden; }
+
+/* ==========================================================
+   联机对战工具条（选将层顶部，默认折叠，不开启时零视觉影响）
+   风格沿用暗玻璃 + 金线；状态灯显示信令 / 数据通道 / 链路类型。
+   ========================================================== */
+.net-bar {
+  width: min(92vw, 880px);
+  margin: 0 auto clamp(6px, 1.2vh, 14px);
+  border: 1px solid rgba(217,178,106,.22);
+  border-radius: 7px;
+  background: linear-gradient(160deg, rgba(24,20,17,.72), rgba(18,16,14,.58));
+  box-shadow: 0 2px 12px rgba(0,0,0,.35);
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+.net-toggle {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; padding: clamp(5px, 1vh, 9px) clamp(10px, 1.6vw, 18px);
+  border: 0; background: transparent; color: #e9d7b0;
+  font-size: clamp(10px, 1.5vh, 13px); letter-spacing: .06em;
+  cursor: pointer; text-align: left;
+}
+.net-toggle em { margin-left: auto; font-style: normal; opacity: .55;
+  transition: transform .18s ease; font-size: .9em; }
+.net-toggle.open em { transform: rotate(180deg); }
+.net-toggle:hover { background: rgba(217,178,106,.07); }
+.net-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: #6f6555; box-shadow: 0 0 0 2px rgba(217,178,106,.14);
+  flex: 0 0 auto;
+}
+.net-bar.net-on .net-dot { background: #7fe3c0; box-shadow: 0 0 8px #7fe3c0; }
+.net-body { padding: 0 clamp(10px, 1.6vw, 18px) clamp(8px, 1.4vh, 14px); }
+.net-body.hidden { display: none; }
+.net-row { display: flex; gap: clamp(8px, 1.4vw, 16px); align-items: flex-end;
+  margin-top: clamp(6px, 1vh, 10px); flex-wrap: wrap; }
+.net-fld { display: flex; flex-direction: column; gap: 3px; flex: 1 1 260px; min-width: 0; }
+.net-fld-sm { flex: 0 1 150px; }
+.net-fld > span { font-size: clamp(9px, 1.25vh, 11px); color: #a99a80;
+  letter-spacing: .04em; }
+.net-fld input, .net-pair input {
+  width: 100%; box-sizing: border-box;
+  padding: clamp(4px, .8vh, 7px) clamp(6px, .9vw, 10px);
+  border: 1px solid rgba(217,178,106,.28); border-radius: 4px;
+  background: rgba(8,7,6,.55); color: #f2e8d5;
+  font-size: clamp(10px, 1.4vh, 12px); outline: none;
+  transition: border-color .16s ease, box-shadow .16s ease;
+  -webkit-user-select: text; user-select: text;
+}
+.net-fld input:focus { border-color: #d9b26a;
+  box-shadow: 0 0 0 2px rgba(217,178,106,.16); }
+.net-pair { display: flex; gap: 5px; }
+.net-adv { opacity: .82; }
+.net-actions { align-items: center; }
+.net-btn {
+  padding: clamp(5px, .9vh, 8px) clamp(10px, 1.5vw, 18px);
+  border: 1px solid rgba(217,178,106,.4); border-radius: 4px;
+  background: rgba(38,30,23,.8); color: #e9d7b0;
+  font-size: clamp(10px, 1.4vh, 12px); cursor: pointer;
+  transition: transform .14s ease, background .14s ease, box-shadow .14s ease;
+}
+.net-btn:hover { transform: translateY(-1px); background: rgba(58,45,32,.9); }
+.net-btn.primary { background: linear-gradient(160deg, #c9a35e, #9b783d);
+  border-color: #e3c483; color: #1c150e; font-weight: 700; }
+.net-btn.primary:hover { box-shadow: 0 2px 12px rgba(217,178,106,.4); }
+.net-btn.ghost { border-color: rgba(180,168,145,.28); color: #a99a80; background: transparent; }
+.net-status {
+  display: flex; align-items: center; gap: 7px;
+  margin-top: clamp(7px, 1.2vh, 12px);
+  font-size: clamp(9px, 1.3vh, 11.5px); color: #a99a80;
+  line-height: 1.4;
+}
+.net-status i { width: 6px; height: 6px; border-radius: 50%; background: #6f6555;
+  flex: 0 0 auto; }
+.net-status.ok { color: #a9dfc6; }
+.net-status.ok i { background: #7fe3c0; box-shadow: 0 0 7px #7fe3c0; }
+.net-status.err { color: #e8a99a; }
+.net-status.err i { background: #d97b68; box-shadow: 0 0 7px #d97b68; }
+
+/* 矮横屏：工具条收紧，别把角色框挤出去 */
+@media (max-height: 520px) {
+  .net-bar { margin-bottom: 4px; }
+  .net-toggle { padding: 4px 10px; }
+  .net-row { margin-top: 5px; }
+  .net-adv { display: none; }
+}
+@media (orientation: portrait) {
+  .net-row { flex-direction: column; align-items: stretch; }
+  .net-fld-sm { flex: 1 1 auto; }
+  .net-actions { flex-wrap: wrap; }
+}

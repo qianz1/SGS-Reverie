@@ -216,7 +216,7 @@
   <div class="start-content">
     <div class="start-kicker"><i></i>CHARACTER SELECT &nbsp;/&nbsp; 选择武将<i></i></div>
     <h2 class="start-title">选择你的武将</h2>
-    <p class="start-sub">另一位武将将由 AI 执掌 &nbsp;·&nbsp; 体力先归零的一方落败</p>
+    <p class="start-sub">另一位武将由 AI 或联机对手执掌 &nbsp;·&nbsp; 体力先归零的一方落败</p>
 
     <!-- 势力筛选 + 搜索：位于角色框上方，独立于 #char-picker，
          过滤时只重建下方角色框，输入框不会失焦。 -->
@@ -270,6 +270,13 @@
 <script src="js/ai.js"></script>
 <script src="js/ui.js"></script>
 <script src="js/game.js"></script>
+<!-- 联机：MQTT 只做建连信令，WebRTC DataChannel 直传游戏数据；
+     主机权威跑完整 Game，客机只收按座位裁剪的快照。纯静态、无构建步骤。 -->
+<script src="net/mqtt.js"></script>
+<script src="net/protocol.js"></script>
+<script src="net/transport.js"></script>
+<script src="net/signaling.js"></script>
+<script src="net/session.js"></script>
 <script src="js/main.js"></script>
 </body>
 </html>
