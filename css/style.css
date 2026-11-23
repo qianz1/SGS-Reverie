@@ -73,6 +73,39 @@ html, body {
   -webkit-tap-highlight-color: transparent;
 }
 
+/* ==========================================================
+   ★ 游戏内 UI 只读：禁止选取文字 / 图片
+   ----------------------------------------------------------
+   主界面、选将层、战斗层、牌局记录、角色框、卡牌上的所有文字与
+   贴图层一律不可框选、不可长按弹出「拷贝 / 存储图像」、不可被系统
+   原生拖走。桌面端拖过标题不会拉出蓝色选区，手机长按立绘不会弹菜单。
+
+   body * 而不是只写 html/body：部分 WebKit 版本对 user-select:none
+   的继承不完整，显式铺到全部后代才稳。
+
+   ★ 唯一例外是真正需要输入的控件（选将界面搜索框）：必须仍能聚焦、
+   输入、选中文字与粘贴，所以紧随其后单独放行。
+   注意本规则只拦「选取 / 原生拖拽」，不碰 pointer-events：
+   点牌、点按钮、点角色框、以及用 Pointer Events 自己实现的拖动排序
+   全部照常工作。
+   ========================================================== */
+html, body, body * {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;   /* iOS 长按不弹「拷贝 / 存储图像」 */
+}
+/* 图片/链接的原生拖拽（拖出浏览器另存为），不影响 JS 自绘拖动 */
+img, a { -webkit-user-drag: none; }
+/* 个别 WebView 仍会给 ::selection 上色，彻底抹掉兜底 */
+::selection { background: transparent; }
+
+/* 输入控件放行：搜索框仍可选字、复制、粘贴 */
+body input, body textarea, body [contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+
 /* ---------- 战场背景：纯 CSS 远景（远山 / 水面 / 雾气） ---------- */
 #app {
   position: relative;
@@ -589,7 +622,7 @@ html, body {
 .hi-sdesc { color: var(--text); opacity: .92; }
 
 /* ================= 行动顺序序号 =================
-   主公为「一」，其余玩家按逆时针。1v1 时容器为空 → 不占位、不显示。
+   一号位先手，其余玩家按逆时针。1v1 座次随机后也显示（容器为空时才不占位）。
    其他玩家（AI）：框外下方居中；自己：框内下方居中。 */
 .hero-seat-out, .hero-seat-in {
   font-size: clamp(9px, 1.4vh, 12px);
