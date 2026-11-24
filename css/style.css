@@ -2186,6 +2186,24 @@ body.allow-portrait .rotate-hint { display: none !important; }
 .start-screen.overlay {
   background: #0e1826;
   padding: 0;
+  /* ★ 手机端展开联机栏后内容会超高：改成整层可上下滑动。
+     用 block + overflow 而不是 flex 居中，避免 flex 在内容超高时把顶部裁掉。 */
+  display: block;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+}
+/* ★ 关键：上面这条 display:block 与 .overlay.hidden{display:none} 同特异性，
+   但位置更靠后，会把它覆盖掉 —— 表现就是「点了选择此将、对局已经在跑，
+   选将层却仍盖在战斗界面上」。这里用更高特异性显式压回去。 */
+.start-screen.overlay.hidden { display: none; }
+/* start-content 从「铺满一层」变成「至少铺满、可继续长高」 */
+.start-screen.overlay .start-content {
+  height: auto;
+  min-height: 100%;
+  padding-bottom: clamp(16px, 4vh, 40px);
 }
 .start-bg-wrap { position: absolute; inset: 0; overflow: hidden; }
 .start-bg {
@@ -2670,8 +2688,9 @@ body.allow-portrait .rotate-hint { display: none !important; }
 .net-body.hidden { display: none; }
 .net-row { display: flex; gap: clamp(8px, 1.4vw, 16px); align-items: flex-end;
   margin-top: clamp(6px, 1vh, 10px); flex-wrap: wrap; }
-.net-fld { display: flex; flex-direction: column; gap: 3px; flex: 1 1 260px; min-width: 0; }
-.net-fld-sm { flex: 0 1 150px; }
+.net-fld { display: flex; flex-direction: column; gap: 3px; flex: 1 1 220px; min-width: 0; }
+.net-fld-room { flex: 1 1 200px; }
+.net-fld-room input { letter-spacing: .18em; text-align: center; font-weight: 700; }
 .net-fld > span { font-size: clamp(9px, 1.25vh, 11px); color: #a99a80;
   letter-spacing: .04em; }
 .net-fld input, .net-pair input {
@@ -2685,9 +2704,7 @@ body.allow-portrait .rotate-hint { display: none !important; }
 }
 .net-fld input:focus { border-color: #d9b26a;
   box-shadow: 0 0 0 2px rgba(217,178,106,.16); }
-.net-pair { display: flex; gap: 5px; }
-.net-adv { opacity: .82; }
-.net-actions { align-items: center; }
+.net-actions { align-items: flex-end; gap: clamp(8px, 1.2vw, 14px); }
 .net-btn {
   padding: clamp(5px, .9vh, 8px) clamp(10px, 1.5vw, 18px);
   border: 1px solid rgba(217,178,106,.4); border-radius: 4px;
@@ -2718,10 +2735,10 @@ body.allow-portrait .rotate-hint { display: none !important; }
   .net-bar { margin-bottom: 4px; }
   .net-toggle { padding: 4px 10px; }
   .net-row { margin-top: 5px; }
-  .net-adv { display: none; }
+  .net-status { margin-top: 6px; }
 }
 @media (orientation: portrait) {
-  .net-row { flex-direction: column; align-items: stretch; }
-  .net-fld-sm { flex: 1 1 auto; }
   .net-actions { flex-wrap: wrap; }
+  .net-fld-room { flex: 1 1 100%; }
+  .net-btn { flex: 1 1 40%; }
 }

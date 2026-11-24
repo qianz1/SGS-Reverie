@@ -326,7 +326,7 @@
     if (peek) {
       // ★【火计】：使用者查看目标手牌，自己挑一张展示
       let id = null;
-      if (user.isHuman && game.ui && typeof game.ui.waitPeekHand === 'function') {
+      if (SGS.isDecider(user) && game.ui && typeof game.ui.waitPeekHand === 'function') {
         id = await game.ui.waitPeekHand(user, game, {
           target: target, cards: hand, card: card,
           hint: '【火计·火攻】查看 ' + target.name + ' 的手牌，' +
@@ -344,7 +344,7 @@
         ' 的手牌并展示其中一张。', 'sys');
     } else {
       // 原版：目标自己决定展示哪张
-      if (target.isHuman && game.ui && typeof game.ui.waitPick === 'function') {
+      if (SGS.isDecider(target) && game.ui && typeof game.ui.waitPick === 'function') {
         const id = await game.ui.waitPick(target, game, {
           hint: '【火攻】请点选一张手牌展示（这张牌不会消失），再点【展示】。',
           confirmLabel: '展示', card: card
@@ -356,6 +356,9 @@
 
     await game.presentCard(shown, target, {
       dest: 'showcase', note: '火攻展示',
+      // ★ 这张牌只是「亮出来」，仍留在目标手里：keepInHand 让飞牌只做替身，
+      //   不把真牌从手牌区摘掉（否则手牌区会空出一格等快照补回来）。
+      keepInHand: true,
       from: target.isHuman ? undefined : 'hero'
     });
     log((peek ? user.name + ' 展示 ' + target.name : target.name) +
@@ -374,7 +377,7 @@
       return;
     }
     let discard = null;
-    if (user.isHuman && game.ui && typeof game.ui.waitPick === 'function') {
+    if (SGS.isDecider(user) && game.ui && typeof game.ui.waitPick === 'function') {
       const id = await game.ui.waitPick(user, game, {
         hint: '【火攻】：点选一张与展示牌【' + shown.suit +
           '】' + (byColor ? '颜色相同' : '花色相同') +
@@ -445,6 +448,9 @@
         from: target.isHuman ? 'equip' : 'hero',
         slot: 'weapon',
         dest: user.isHuman ? 'hand' : 'ai-hero',
+        // ★ 获得者显式下发：联机层据此按座位号判「谁能看正面」
+        //   （provide=target / receive=user，其余玩家一律牌背）。
+        toPlayer: user,
         onArrive: () => {
           if (SGS.Equipment) SGS.Equipment.unmount(target, weapon.id);
           user.hand.push(weapon);
@@ -503,7 +509,7 @@
       showWuguTurn(t, i);
       if (wxCtx && await game.askWuXie(wxCtx, t, user)) continue;
       let picked = null;
-      if (t.isHuman && game.ui && typeof game.ui.waitWugu === 'function') {
+      if (SGS.isDecider(t) && game.ui && typeof game.ui.waitWugu === 'function') {
         const id = await game.ui.waitWugu(game, t, card, pool.slice(), i + 1, order.length);
         if (id) picked = pool.find((c) => c.id === id) || null;
       }
@@ -516,6 +522,10 @@
       }
       await game.presentCard(picked, user, {
         dest: t.isHuman ? 'hand' : 'ai-hero',
+        toPlayer: t,                     // ★ 获得者：只有 t 与使用者看正面
+        // ★ 五谷丰登的牌是当众亮在面板上的 → 全场公开，
+        //   飞牌对所有人显示正面（不受「提供者/获得者」限制）。
+        public: true,
         onArrive: () => { t.hand.push(picked); game.ui.render(game); }
       });
       log(t.name + ' 获得【' + picked.name + '】。', 'sys');
@@ -588,6 +598,13 @@
     // ★ opts.realCard：【火计】把红色「牌」当【火攻】时，card 只是「当作牌」，
     //   飞牌 / 离手 / 进弃牌堆仍用原来的实体牌，弃牌堆不会混进假火攻。
     const real = opts.realCard || card;
+    // ★【连环】：♣ 牌当【铁索连环】使用时写发动记录，UI.log 兜底播
+    //   技能大字 + SHU-PangTong_LianHuan.webm（真铁索多连一人的记录在
+    //   Game.selectTargets 里写，两处不会重复）。
+    if (card.type === 'tiesuolianhuan' && opts.skillName) {
+      log(user.name + ' 发动【' + opts.skillName + '】，将【' + real.name +
+        '】当【铁索连环】使用。', 'sys');
+    }
     await game.presentCard(real, user, {
       dest: 'showcase', asName: opts.asName || null
     });
@@ -651,6 +668,9 @@
         } else if (entry) {
           await game.presentCard(entry.card, target, {
             from: 'hero', dest: user.isHuman ? 'hand' : 'ai-hero',
+            // ★ 获得者显式下发：联机层按座位号判「谁能看正面」
+            //   （provide=target / receive=user，其余玩家一律牌背）。
+            toPlayer: user,
             // ★ 玩家自己获得牌：一律正面插入手牌区（与摸牌同款 FLIP 动画）；
             //   AI 获得牌仍按来源明暗区分（暗手牌背面朝上，装备/判定区明牌正面）。
             faceDown: user.isHuman ? false : !entry.faceUp,

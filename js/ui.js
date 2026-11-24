@@ -175,12 +175,14 @@
       : (player.hand || []).slice();
     return skillNamesOf(player).map((name) => {
       const convs = skillConversionsFor(player, scene, need, name);
-      const enabled = convs.some((c) =>
+      const canConvert = convs.some((c) =>
         conversionUsable(player, c, scene, noShaCount) &&
         pool.some((h) => SGS.Cards.matchesFrom(h, c.from) &&
           (typeof player.canUseAsType !== 'function' || player.canUseAsType(h, c.to)))
       );
-      return { name: name, enabled: enabled };
+      // ★ 一次性主动技（【涅槃】）：不依赖手牌素材，只要本局没用过就点亮
+      const action = SGS.canUseSkillAction(player, name, scene);
+      return { name: name, enabled: canConvert || action, action: action };
     });
   }
 
@@ -194,9 +196,14 @@
     const states = skillButtonStates(pd.player, scene, need, opts.noShaCount);
     states.forEach((st) => {
       if (st.enabled && !opts.forceDisabled) {
+        // 「可以」类主动技 → 选牌转化；一次性主动技（涅槃）→ 直接发动
+        const isAction = !!(st.action &&
+          SGS.findSkillAction(pd.player, st.name, scene));
         list.push({
           label: st.name, cls: 'skill', slot: 'skill',
-          onClick: () => ui.openSkill(pd, scene, st.name)
+          onClick: isAction
+            ? () => ui.invokeSkillAction(pd, scene, st.name)
+            : () => ui.openSkill(pd, scene, st.name)
         });
       } else {
         list.push({
@@ -279,6 +286,9 @@
       //   suppress 供 flipInsertIntoHand 使用（它自己已做让位，别叠加两次）。
       this._handFlipGen = 0;
       this._handFlipSuppress = false;
+      // ★ 正在「离手飞行」的牌 id → 起飞时间戳。手牌渲染时把它们当作已经
+      //   不在手里，直到权威手牌数据里真的没有它们（见 visibleHand）。
+      this._departing = {};
     }
 
     init() {
@@ -459,6 +469,8 @@
         if (sk.name) map[String(sk.name).trim()] = true;
         if (sk.titles) String(sk.titles).split(/[\u00b7|\uff5c\s\u3001,]+/)
           .forEach((n) => { const t = n.trim(); if (t) map[t] = true; });
+        // ★ 局中才获得的技能（如【涅槃】三选一）同样要能播横幅 / 语音
+        Object.keys(sk.fragments || {}).forEach((n) => { map[n] = true; });
       });
       return map;
     }
@@ -974,6 +986,10 @@
 
     cardHTML(c, opts) {
       opts = opts || {};
+      // ★ 兜底：任何「牌背」占位对象都走 cardBackHTML()（优先 back.webp 贴图），
+      //   绝不落到「按 type 找卡面贴图」的分支 —— 那样会画出一张无图、
+      //   只有 CSS 底纹和「牌背」两个字的空卡。飞牌 / 展示区 / 面板共用。
+      if (c && c.type === 'back') return this.cardBackHTML();
       // 只有预探测成功的图片才输出 <img>；素材缺失 / 加载错误时
       // 完全不插入图片节点，CSS 绘制的卡面（牌名、点数、花色）照常显示。
       const artUrl = this.art.cards[c.type];
@@ -1106,6 +1122,120 @@
     }
 
     /* ---------------- 手牌自动 FLIP（render 内置） ---------------- */
+
+    /**
+     * ★「离手」预测整理：出牌 / 弃牌 / 使用装备时，手牌区【立刻】按
+     *   「这张牌已经离开」重排，让手牌合拢与飞牌同一帧开始。
+     *
+     * 关键点（这里踩过坑，改动前务必读完）：
+     *   · 真牌必须【真的从 DOM 里摘掉】，不能只 visibility:hidden。
+     *     隐藏只影响绘制、仍占布局位：量出来的「移除后」坐标其实用不上，
+     *     等 FLIP 的 transform 回到 0，留下来那些牌又会被 flex 排回原位 ——
+     *     表现就是「手牌先挤过去、飞牌快落地时又散开、落地再挤一次」。
+     *   · 摘掉后调用 layoutHand()，让 #me-hand 真正按「少一张」布局，
+     *     再用 FLIP 把留下来的牌从旧位置平滑过渡到新位置。
+     *   · 摘掉的牌 id 记进 this._departing，render / syncHandDOM 会把它当作
+     *     「已经不在手里」，直到权威手牌数据里真的没有它（见 visibleHand）。
+     *     否则快照 / ask 触发的重绘会把这半秒内还在状态里的牌重新塞回手牌区，
+     *     就是「牌已经飞走、原位又闪一下原牌」。
+     *
+     * @returns {boolean} true = 已从手牌区摘掉并开始合拢动画
+     */
+    predictHandDeparture(cardEl) {
+      const handEl = $('me-hand');
+      if (!handEl || !cardEl || typeof document.querySelectorAll !== 'function') return false;
+      const list = () => {
+        try { return Array.prototype.slice.call(
+          document.querySelectorAll('#me-hand .card')); } catch (e) { return []; }
+      };
+      const all = list();
+      if (all.indexOf(cardEl) < 0) return false;
+      const idOf = (el) => el && el.dataset && el.dataset.id != null
+        ? String(el.dataset.id) : '';
+      // ① FIRST：先记下留下来的每张牌当前位置（不含正在离场的那张）
+      const before = {};
+      all.forEach((el) => {
+        if (el === cardEl) return;
+        const id = idOf(el);
+        const r = el && typeof el.getBoundingClientRect === 'function'
+          ? el.getBoundingClientRect() : null;
+        if (id && r && r.width) before[id] = { left: r.left, top: r.top };
+      });
+      // ② 真离手：摘节点（摘成功才登记 id）+ 重排
+      if (cardEl.parentNode && cardEl.parentNode.removeChild) {
+        cardEl.parentNode.removeChild(cardEl);
+      } else if (typeof handEl.removeChild === 'function') {
+        handEl.removeChild(cardEl);
+      } else {
+        return false;
+      }
+      const goneId = idOf(cardEl);
+      if (goneId) this._departing[goneId] = Date.now();
+      this.layoutHand(all.length - 1);
+      // ③ LAST + INVERT：留下来的牌先拉回旧位置，下一帧过渡到新位置
+      const movers = [];
+      list().forEach((el) => {
+        const id = idOf(el);
+        const b = id && before[id];
+        if (!b) return;
+        const r = el && typeof el.getBoundingClientRect === 'function'
+          ? el.getBoundingClientRect() : null;
+        if (!r || !r.width) return;
+        const dx = b.left - r.left, dy = b.top - r.top;
+        if (Math.abs(dx) < .5 && Math.abs(dy) < .5) return;
+        el.style.transition = 'none';
+        el.style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
+        if (el.classList) el.classList.add('flip-move');
+        movers.push(el);
+      });
+      if (movers.length) {
+        const play = () => movers.forEach((el) => {
+          el.style.transition = 'transform .42s cubic-bezier(.22,.61,.36,1)';
+          el.style.transform = 'translate(0,0)';
+        });
+        if (typeof requestAnimationFrame === 'function') {
+          requestAnimationFrame(() => requestAnimationFrame(play));
+        } else play();
+        this._predictMovers = (this._predictMovers || []).concat(movers);
+      }
+      return true;
+    }
+
+    /**
+     * 手牌里「还在手上」的那些牌：把 _departing 里已经离场的牌滤掉。
+     *
+     * 何时清除 _departing：
+     *   · 权威手牌数据已经不含这个 id → 离手完成（正常路径，下一次 render 就清）
+     *   · 超过 1.6s 仍在手牌里    → 兜底（例如某次飞牌后被回滚），恢复显示
+     * 这样「牌已飞走但状态还没更新」的窗口内，任何一次重绘都不会把它塞回来。
+     */
+    visibleHand(hand) {
+      const map = this._departing || {};
+      const arr = hand || [];
+      const ids = {};
+      arr.forEach((c) => { if (c && c.id != null) ids[String(c.id)] = true; });
+      const now = Date.now();
+      Object.keys(map).forEach((k) => {
+        if (!ids[k]) delete map[k];
+        else if (now - map[k] > 1600) delete map[k];
+      });
+      const keys = Object.keys(map);
+      if (!keys.length) return arr;
+      return arr.filter((c) => !(c && c.id != null && map[String(c.id)]));
+    }
+
+    /** 手牌真正重排后清掉预测残留的 inline 样式 */
+    clearPredictMovers() {
+      const list = this._predictMovers || [];
+      this._predictMovers = [];
+      list.forEach((el) => {
+        try {
+          el.style.transition = '';
+          el.style.transform = '';
+          if (el.classList) el.classList.remove('flip-move');
+        } catch (e) { /* 节点已移除 */ }
+      });
+    }
 
     /**
      * FIRST：在 #me-hand 被 innerHTML 重建之前，记录每张旧手牌的屏幕位置。
@@ -1331,10 +1461,15 @@
       const block = (name, desc) =>
         '<div class="hi-skill"><div class="hi-sname">' + esc(name) + '</div>' +
         '<div class="hi-sdesc">' + esc(desc) + '</div></div>';
-      const list = ch.skills || (ch.skill ? [ch.skill] : []);
+      // ★ 局内读玩家当前技能视图：涅槃后新获得的技能立即出现在角色信息里；
+      //   选将界面传的伪 player 没有 skill，仍读 char.skill（含 ☆ 备选说明）
+      const currentSkill = p.skill || ch.skill;
+      const list = ch.skills || (currentSkill ? [currentSkill] : []);
       const body = list.map((s) => {
         const parts = String(s.desc || '').split(/\s*[｜|]\s*/)
-          .map((x) => x.trim()).filter(Boolean);
+          .map((x) => x.trim()).filter(Boolean)
+          // ★ 局内只展示已拥有的技能：选将卡保留 ☆ 备选说明
+          .filter((x) => !p.skill || !/^\u2606/.test(x));
         if (parts.length > 1) {
           return parts.map((d) => {
             const m = d.match(/^(.+?)[：:]([\s\S]*)$/);
@@ -1349,6 +1484,186 @@
         '<div class="hi-meta">势力 ' + esc(ch.faction || '群') +
         ' · 体力 ' + p.hp + '/' + p.maxHp +
         (noHand ? '' : ' · 手牌 ' + (p.hand || []).length) + '</div>' + body;
+    }
+
+    /**
+     * 单个角色框的渲染（名字 / 体力 / 手牌数 / 势力 / 立绘 / 信息浮层）。
+     * 从 render() 里抽出来，供客机差量渲染只刷新真正变化的那一侧。
+     */
+    renderSide(p, prefix) {
+      const faction = p.char.faction || '群';
+      const shownName = displayNameOf(p);
+      const nameEl = $(prefix + '-name');
+      if (nameEl) nameEl.textContent = shownName;       // ★ 只写名字，不叠势力
+      const hpEl = $(prefix + '-hp');
+      if (hpEl) hpEl.innerHTML = this.hpHTML(p);        // 体力点竖排（自上而下扣除）
+      // 对手：角色卡左下角只写手牌张数数字；玩家：底部手牌区显示文字
+      const cnt = $(prefix + '-count');
+      const countText = prefix === 'ai'
+        ? String(p.hand.length)
+        : '手牌 ' + p.hand.length + ' 张';
+      if (cnt && cnt.textContent !== countText) cnt.textContent = countText;
+      const f = $(prefix + '-faction');
+      if (f) { f.textContent = faction; f.dataset.faction = faction; }
+
+      // 角色图片：探测成功才设置 src 并启用 has-art；失败保持 CSS 绘制。
+      // 只在 src 变化时重设，避免每次 render 都重新加载 / 闪烁。
+      const hero = $(prefix + '-area');
+      const artEl = $(prefix + '-art');
+      if (!hero || !artEl) return;
+      const artUrl = (this.art.characters[p.char.id]) || '';
+      // ★ 名字竖排在左侧、紧接势力图标下方，字号固定与势力一致。
+      //   只把名字字数（换算成 1/字数 保护系数）与体力圆点数交给 CSS。
+      if (hero.style && typeof hero.style.setProperty === 'function') {
+        const len = Math.max(1, shownName.length);
+        hero.style.setProperty('--name-scale', (1 / len).toFixed(4));
+        hero.style.setProperty('--hp-pips', String(Math.max(1, p.maxHp || 1)));
+      }
+      if (artEl.dataset.art !== artUrl) {
+        artEl.dataset.art = artUrl;
+        artEl.style.display = '';
+        hero.classList.remove('has-art');
+        if (artUrl) artEl.src = artUrl;
+      }
+      if (artUrl) hero.classList.add('has-art');
+      else hero.classList.remove('has-art');
+      // ★ 角色信息浮层内容随体力 / 手牌实时刷新；显隐由 CSS hover + 点击 class 控制
+      const info = $(prefix + '-info');
+      if (info) info.innerHTML = this.heroInfoHTML(p);
+    }
+
+    /**
+     * 按 data-id 同步 #me-hand 的 DOM（视图模式 / 快照共用的 keyed diff）。
+     *
+     * ★ 为什么要共用：飞牌替身会把「真牌」临时 visibility:hidden，FLIP 也会
+     *   给留下来的牌挂 inline transform。此时任何一次 innerHTML 重建都会让
+     *   真牌重新显露 / 位移归零 —— 客机在无懈询问等 ask 重绘时看到的「小拉回」
+     *   正是这么来的。这里只增删 / 重排真正变化的节点，未变化的节点身份、
+     *   class 之外的内联样式一律保留。
+     *
+     * @returns {boolean} 是否发生了增删 / 重排（只有 class 变化返回 false）
+     */
+    syncHandDOM(hand, optsFor) {
+      const handEl = $('me-hand');
+      if (!handEl || typeof document === 'undefined' ||
+          typeof document.querySelectorAll !== 'function') return false;
+      let kids = [];
+      try {
+        kids = Array.prototype.slice.call(document.querySelectorAll('#me-hand .card'));
+      } catch (e) { return false; }
+      // ★ 正在飞出手牌区的那几张按「已离手」处理：否则快照重绘会把状态里
+      //   还没删掉的牌重新塞回手牌区，牌已飞走、原位又闪一下原牌。
+      const viewHand = this.visibleHand(hand);
+      const wanted = viewHand.map((c) => ({ card: c, id: String(c.id) }));
+      const kidIds = kids.map((k) => k && k.dataset && k.dataset.id != null
+        ? String(k.dataset.id) : '');
+      const same = wanted.length === kids.length &&
+        wanted.every((w, i) => w.id === kidIds[i]);
+      const applyClass = (node, c) => {
+        if (!node || !node.classList || !optsFor) return;
+        const html = this.cardHTML(c, optsFor(c));
+        const m = /^<div class="([^"]*)"/.exec(html);
+        if (m && node.className !== m[1]) node.className = m[1];
+      };
+      if (same) {
+        kids.forEach((k, i) => applyClass(k, wanted[i].card));
+        return false;
+      }
+      const byId = {};
+      kids.forEach((k) => {
+        const id = k && k.dataset && k.dataset.id;
+        if (id != null) byId[String(id)] = k;
+      });
+      const ids = wanted.map((w) => w.id);
+      kids.forEach((k) => {
+        const id = k && k.dataset && String(k.dataset.id);
+        if (ids.indexOf(id) < 0 && handEl.removeChild) handEl.removeChild(k);
+      });
+      let ref = null;
+      for (let i = wanted.length - 1; i >= 0; i--) {
+        const w = wanted[i];
+        let node = byId[w.id];
+        if (!node) {
+          const holder = document.createElement('div');
+          holder.innerHTML = this.cardHTML(w.card, optsFor ? optsFor(w.card) : null);
+          node = holder.firstElementChild ||
+            (holder.children && holder.children[0]) || holder.firstChild;
+          if (!node) continue;
+        }
+        applyClass(node, w.card);
+        if (typeof handEl.insertBefore === 'function') handEl.insertBefore(node, ref || null);
+        else handEl.appendChild(node);
+        ref = node;
+      }
+      return true;
+    }
+
+    /**
+     * ★ 客机专用：按「牌 id」做差量渲染。
+     *
+     * 主机快照每次都包含全部角色 / 手牌数据，但两次快照之间真正变化的往往
+     * 只有一两张牌。原先客机 onSnap 直接走 render()，会整块重建 #me-hand 的
+     * innerHTML —— 未变化的牌也换了 DOM 身份，CSS 过渡被掐断、图片重复解码，
+     * 正在飞的牌也更容易和重建后的手牌打架。
+     *
+     * 这里只更新真正变了的区域；手牌按 data-id 复用旧节点，只增删 / 移动
+     * 有变化的那些，未变化的节点连 class 与内联样式都原样保留（选牌高亮、
+     * 刚选中动画因此不会被快照冲掉）。pending 驱动的按钮 / 目标高亮由 ask
+     * 路径的完整 render() 负责，本方法不碰。
+     */
+    renderPatch(game, prev, snap) {
+      if (!game || !snap || !game.human || !game.aiPlayer) return;
+      const $ = (id) => (typeof document !== 'undefined' && document.getElementById)
+        ? document.getElementById(id) : null;
+      const setText = (id, v) => {
+        const e = $(id); if (e && e.textContent !== v) e.textContent = v;
+      };
+      const setHTML = (id, v) => {
+        const e = $(id); if (e && e.innerHTML !== v) e.innerHTML = v;
+      };
+      const sig = (v) => { try { return JSON.stringify(v); } catch (e) { return String(v); } };
+      // 只比较会影响画面的字段，避免 char 对象里的方法 / 引用造成假变化。
+      const dSig = (d) => !d ? '' : sig({
+        name: d.name, hp: d.hp, maxHp: d.maxHp, chained: d.chained,
+        handCount: d.handCount, handIds: d.handIds,
+        hand: (d.hand || []).map((c) => c.id),
+        delayed: (d.delayed || []).map((c) => c.id),
+        equips: d.equips
+      });
+      const cur = {};
+      (snap.players || []).forEach((d) => { cur[d.seat] = d; });
+      const old = {};
+      ((prev && prev.players) || []).forEach((d) => { old[d.seat] = d; });
+      const me = game.human, ai = game.aiPlayer;
+      const meChanged = !prev || dSig(old[me.seat]) !== dSig(cur[me.seat]);
+      const aiChanged = !prev || dSig(old[ai.seat]) !== dSig(cur[ai.seat]);
+
+      setText('round-info', '第 ' + game.round + ' 轮 · ' +
+        (game.actor.isHuman ? '你的回合'
+          : (game.vsAI === false ? '对手回合' : 'AI 回合')));
+      setText('deck-info', '牌堆 ' + game.deck.remaining + ' 张 / 弃牌 ' +
+        (game.deck.discardPile ? game.deck.discardPile.length : 0) + ' 张');
+      setText('ai-seat', game.players.length > 1 ? SGS.seatLabel(ai.seat || 2) : '');
+      setText('me-seat', game.players.length > 1 ? SGS.seatLabel(me.seat || 1) : '');
+
+      if (meChanged) this.renderSide(me, 'me');
+      if (aiChanged) this.renderSide(ai, 'ai');
+      if (meChanged || aiChanged) this.renderEquips(game);
+      if (meChanged) setHTML('me-judge-marks', this.judgeMarkHTML(me));
+      if (aiChanged) setHTML('ai-judge', this.judgeMarkHTML(ai));
+
+      const aiArea = $('ai-area'), meArea = $('me-area');
+      if (aiArea && aiArea.classList) aiArea.classList.toggle('acting', game.actor === ai);
+      if (meArea && meArea.classList) meArea.classList.toggle('acting', game.actor === me);
+
+      // ★ 手牌 keyed diff：与 render() 的视图模式共用同一套同步逻辑。
+      if (!$('me-hand') || typeof document.querySelectorAll !== 'function') return;
+      const before = this._handFlipSuppress ? null : this.captureHandRects();
+      const changed = this.syncHandDOM(me.hand, null);
+      this.clearPredictMovers();
+      if (!changed) return;
+      this.layoutHand(this.visibleHand(me.hand).length);
+      if (before) this.playHandFlip(before);
     }
 
     render(game) {
@@ -1366,48 +1681,8 @@
       $('deck-info').textContent = '牌堆 ' + game.deck.remaining + ' 张 / 弃牌 ' +
         (game.deck.discardPile ? game.deck.discardPile.length : 0) + ' 张';
 
-      const side = (p, prefix) => {
-        const faction = p.char.faction || '群';
-        const shownName = displayNameOf(p);
-        $(prefix + '-name').textContent = shownName;       // ★ 只写名字，不叠势力
-        $(prefix + '-hp').innerHTML = this.hpHTML(p);      // 体力点竖排（自上而下扣除）
-        // 对手：角色卡左下角只写手牌张数数字；玩家：底部手牌区显示文字
-        $(prefix + '-count').textContent = prefix === 'ai'
-          ? String(p.hand.length)
-          : '手牌 ' + p.hand.length + ' 张';
-        const f = $(prefix + '-faction');
-        f.textContent = faction;
-        f.dataset.faction = faction;
-
-        // 角色图片：探测成功才设置 src 并启用 has-art；失败保持 CSS 绘制。
-        // 只在 src 变化时重设，避免每次 render 都重新加载 / 闪烁。
-        const hero = $(prefix + '-area');
-        const artEl = $(prefix + '-art');
-        const artUrl = this.art.characters[p.char.id] || '';
-        // ★ 名字竖排在左侧、紧接势力图标下方，字号固定与势力一致。
-        //   只把名字字数（换算成 1/字数 保护系数）与体力圆点数交给 CSS：
-        //   「字数 × 势力字号 ≤ 可用高度」时完全不缩；只有确实会碰到体力
-        //   圆点时才缩到刚好不碰。setProperty 做防御，方便无 DOM 自测桩运行。
-        if (hero.style && typeof hero.style.setProperty === 'function') {
-          const len = Math.max(1, shownName.length);
-          hero.style.setProperty('--name-scale', (1 / len).toFixed(4));
-          hero.style.setProperty('--hp-pips', String(Math.max(1, p.maxHp || 1)));
-        }
-        if (artEl.dataset.art !== artUrl) {
-          artEl.dataset.art = artUrl;
-          artEl.style.display = '';
-          hero.classList.remove('has-art');
-          if (artUrl) artEl.src = artUrl;
-        }
-        if (artUrl) hero.classList.add('has-art');
-        else hero.classList.remove('has-art');
-      };
-      side(ai, 'ai');
-      side(me, 'me');
-      // ★ 角色信息浮层内容随体力 / 手牌实时刷新；显隐由 CSS hover + 点击 class 控制
-      const aiInfo = $('ai-info'), meInfo = $('me-info');
-      if (aiInfo) aiInfo.innerHTML = this.heroInfoHTML(ai);
-      if (meInfo) meInfo.innerHTML = this.heroInfoHTML(me);
+      this.renderSide(ai, 'ai');
+      this.renderSide(me, 'me');
       this.renderEquips(game);   // 玩家四栏装备区 + 其他角色框内迷你装备栏
 
       // 判定区图标：玩家在底部手牌区左上方的独立区域，其他角色在角色框下边框
@@ -1499,19 +1774,32 @@
       // ★ 自动 FLIP：重建前记录旧手牌位置，重建后让留下来的牌平滑合拢。
       //   flipInsertIntoHand 会临时置 suppress（它自己已做让位，避免叠加）。
       const handFlipBefore = this._handFlipSuppress ? null : this.captureHandRects();
-      $('me-hand').innerHTML = me.hand
-        .map((c) => this.cardHTML(c, {
-          selected: selected.indexOf(c.id) >= 0,
-          justPicked: c.id === justPicked,
-          dim: baseDim ||
-            (skillMode && !findConversion(pd.player, c, pd.scene, pd.respondNeed, pd.skillName)) ||
-            (respondMode && !SGS.Cards.matchesRespond(c, respondNeed)) ||
-            (pickMode && pd.pickFilter && !pd.pickFilter(c)) ||
-            (brinkMode && !(pd.saves || []).some((s) => s.id === c.id))
-        }))
-        .join('');
-      this.layoutHand(me.hand.length);
-      if (handFlipBefore) this.playHandFlip(handFlipBefore);
+      const handOpts = (c) => ({
+        selected: selected.indexOf(c.id) >= 0,
+        justPicked: c.id === justPicked,
+        dim: baseDim ||
+          (skillMode && !findConversion(pd.player, c, pd.scene, pd.respondNeed, pd.skillName)) ||
+          (respondMode && !SGS.Cards.matchesRespond(c, respondNeed)) ||
+          (pickMode && pd.pickFilter && !pd.pickFilter(c)) ||
+          (brinkMode && !(pd.saves || []).some((s) => s.id === c.id))
+      });
+      // ★ 客机视图模式：ask 触发的 render() 也走 keyed diff，绝不重建手牌 DOM。
+      //   否则无懈询问到来时，正在飞的真牌会「重新冒出来」，表现为小拉回。
+      // ★ 正在飞出手牌区的那几张（_departing）不算在手牌里：手牌区按「少一张」
+      //   布局，飞牌动画期间不会被快照 / ask 重绘拉回来。
+      const viewHand = this.visibleHand(me.hand);
+      if (this._netView && typeof this.syncHandDOM === 'function' &&
+          typeof document.querySelectorAll === 'function') {
+        if (this.syncHandDOM(me.hand, handOpts)) {
+          this.layoutHand(viewHand.length);
+          if (handFlipBefore) this.playHandFlip(handFlipBefore);
+        }
+      } else {
+        $('me-hand').innerHTML = viewHand.map((c) => this.cardHTML(c, handOpts(c))).join('');
+        this.layoutHand(viewHand.length);
+        if (handFlipBefore) this.playHandFlip(handFlipBefore);
+      }
+      this.clearPredictMovers();
 
       // 当前行动方描边
       $('ai-area').classList.toggle('acting', game.actor === ai);
@@ -1762,10 +2050,15 @@
       cards = (cards || []).filter(Boolean);
       if (!cards.length) return Promise.resolve();
       const app = $('app');
+      // ★ opts.batch：客机重放主机「玩家批量弃牌」时用。客机视角下那位玩家
+      //   落在 aiPlayer（isHuman=false），单靠 isHuman 判定会退化成逐张飞、
+      //   全部落到展示区中央叠在一起；显式标记后走与主机完全相同的
+      //   showTableCardsBatch → 每张各有最终格、同时起飞、同时落地。
       const canBatch = app && $('table-card') && cards.length > 1 &&
         !opts.onArrive && !opts.from && !opts.faceDown &&
         (opts.dest || 'showcase') === 'showcase' &&
-        fromPlayer && fromPlayer.isHuman && this.game &&
+        this.game &&
+        (opts.batch || (fromPlayer && fromPlayer.isHuman)) &&
         typeof app.appendChild === 'function' &&
         typeof document.createElement === 'function';
       if (!canBatch) {
@@ -1835,7 +2128,12 @@
       let src = hero;
       let handCardEl = null;   // 玩家手牌里被飞出的那张真 DOM（起飞时隐藏）
       const fromHand = !opts.from && fromPlayer && fromPlayer.isHuman;
-      if (opts.from === 'equip') {
+      // ★ from:'table' = 从中央展示区/牌堆起飞（联机客机重放摸牌动画用）。
+      //   不这么指定时，fromPlayer.isHuman 会从手牌区起飞、对手会从角色框起飞，
+      //   与 dest='hand'/'ai-hero' 落点重叠 → 飞牌几乎原地不动，看起来没动画。
+      if (opts.from === 'table') {
+        src = R($('table-card')) || R(app);
+      } else if (opts.from === 'equip') {
         const slot = opts.slot || 'weapon';
         if (fromPlayer && fromPlayer.isHuman) {
           src = R($('me-equip-' + slot)) || R($('me-equip-area')) || hero;
@@ -1860,7 +2158,8 @@
         const r = R(handCard);
         if (r && r.width) {
           src = r;
-          handCardEl = handCard;   // 起飞时隐藏它，避免与克隆飞牌重影
+          // 起飞后这张真牌会被摘掉（predictHandDeparture），避免与克隆飞牌重影
+          handCardEl = handCard;
         } else {
           src = R($('me-hand')) || hero;
         }
@@ -1881,7 +2180,8 @@
       //   一张「框那么大的牌」。这里改成真实卡牌尺寸，并把起点收拢到角色框
       //   中央：与摸牌动画尺寸一致，落点也能精确对接装备槽 / 手牌最右边。
       if (opts.faceDown || opts.from === 'hero' || opts.from === 'equip' ||
-          dest === 'equip' || dest === 'hand' || dest === 'ai-hero') {
+          opts.from === 'table' || dest === 'equip' ||
+          dest === 'hand' || dest === 'ai-hero') {
         let sample = null;
         try {
           if (typeof document.querySelector === 'function') {
@@ -1899,6 +2199,21 @@
           top: src.top + (src.height - h) / 2,
           width: w, height: h
         };
+      }
+
+      // ★ 客机视图里的「进入手牌」：状态已由权威快照同步，onArrive 被剥掉，
+      //   但仍要和主机一样走「插入手牌」动画 —— 真牌先隐藏、从牌堆飞进自己
+      //   最终那一格，手牌整理与飞牌同帧完成，不会先出牌再瞬间跳位。
+      if (this._netView && dest === 'hand' && this.game &&
+          typeof this.flipInsertIntoHand === 'function' &&
+          typeof opts.onArrive !== 'function' &&
+          typeof document.querySelectorAll === 'function') {
+        return this.flipInsertIntoHand([card], this.game.human, this.game, {
+          sourceRect: { left: src.left, top: src.top, width: src.width, height: src.height },
+          // ★ 连摸多张时把逐张错峰一起带进去，观感与主机 animateDraw 一致
+          delay: opts.delay || 0,
+          viewOnly: true
+        });
       }
 
       // ★ 玩家获得牌（顺手牵羊 / 借刀杀人等）：与「玩家自己摸牌」共用同一套
@@ -1949,15 +2264,22 @@
         } catch (e) { showcaseCommitted = null; targetRect = null; }
       }
 
+      // ★ 多张同批飞行（联机摸牌重放）的错位参数：与 animateDrawToAI 一致，
+      //   每张只露出 1/3、后一张盖住前一张 2/3，不再几张完全重叠。
+      const stackCount = Math.max(1, opts.stackCount || 1);
+      const stackIndex = Math.min(stackCount - 1,
+        Math.max(0, opts.stackIndex == null ? 0 : opts.stackIndex));
+      const stackStep = w / 3;
       let toLeft, toTop;
       if (dest === 'hand') {
         // 兼容兜底：无 game / 无 onArrive 时仍按旧落点飞（正面）
         const handR = R($('me-hand')) || dRect;
-        toLeft = this.handAppendX(w, handR);
+        toLeft = this.handAppendX(w, handR) - (stackCount - 1 - stackIndex) * stackStep;
         toTop = handR.top + (handR.height - h) / 2;
       } else if (dest === 'ai-hero') {
         // AI 偷牌：没有独立手牌区，飞向 AI 角色框右端代表其手牌
-        toLeft = dRect.left + dRect.width - w;
+        toLeft = dRect.left + dRect.width - w -
+          (stackCount - 1 - stackIndex) * stackStep;
         toTop = dRect.top + (dRect.height - h) / 2;
       } else if (dest === 'equip') {
         // ★ 装备牌：玩家飞到左侧装备区里对应的那一栏；其他角色飞到其
@@ -1980,20 +2302,61 @@
 
       const fly = document.createElement('div');
       fly.className = 'fly-card' + (targetRect ? ' to-showcase' : '');
+      if (opts.stackIndex != null) fly.style.zIndex = String(21 + stackIndex);
       fly.style.left = src.left + 'px';
       fly.style.top = src.top + 'px';
       fly.style.width = w + 'px';
       fly.style.height = h + 'px';
-      // ★ 玩家自己获得牌（dest==='hand'）一律正面朝上；
-      //   只有 AI 获得牌（ai-hero）/ 其它背面场景才用牌背。
-      const faceDown = !!opts.faceDown && dest !== 'hand';
+      // ★★ 正反面的绝对判据（本地屏幕同样适用）：只有【牌的提供者】与
+      //   【获得者】能看到正面，其余任何人（含单机里的 AI 对阵 AI）只看牌背。
+      //   · 提供者 = 参数 fromPlayer；获得者 = opts.toPlayer，缺省按落点还原
+      //     （'hand' = 本地玩家收下，'ai-hero' = 别人收下）。
+      //   · 两个座位/角色都拿不到时（无 game 的自测假界面）退回 opts.faceDown。
+      //   这样一来：AI 牵走你的暗手牌 → 你是提供者，看到正面；
+      //   AI 牵走别人的牌 → 你两者都不是，只看到牌背。
+      const faceDown = (() => {
+        if (dest !== 'hand' && dest !== 'ai-hero') return !!opts.faceDown;
+        // ★ 例外：全场公开的牌（五谷亮出的牌 / 装备区·判定区明牌）→ 人人看正面
+        if (opts.public) return false;
+        const me = this.game && this.game.human;
+        if (!me) return !!opts.faceDown && dest !== 'hand';
+        let recv = opts.toPlayer || null;
+        if (!recv && dest === 'hand') recv = me;
+        if (!recv && dest === 'ai-hero' && this.game.players) {
+          // 兼容旧调用（没给 toPlayer）：1v1 里「不是我就是对手」
+          recv = this.game.players.filter((p) => p && p !== me)[0] || null;
+        }
+        const isProvider = !!fromPlayer && fromPlayer === me;
+        const isReceiver = !!recv && recv === me;
+        return !(isProvider || isReceiver);
+      })();
       fly.innerHTML = faceDown ? this.cardBackHTML() : this.cardHTML(card);
       app.appendChild(fly);
-      // ★ 飞牌就是这张手牌的「替身」：原 DOM 先隐藏，落地后调用方会
-      //   removeCard + render 重建手牌，隐藏自然消失；期间不再有重影。
-      if (handCardEl && handCardEl.style) handCardEl.style.visibility = 'hidden';
+      // ★ 飞牌就是这张手牌的「替身」。三种处理，按顺序判定：
+      //   ① opts.keepInHand（【火攻】亮牌这类「展示但不离手」）→ 只隐藏，
+      //      落地恢复，牌一直在手里；
+      //   ② 正常出牌 / 用装备 / 弃牌 → predictHandDeparture()：把真牌从 DOM
+      //      摘掉并按「少一张」重排，留下来的牌 FLIP 合拢。摘掉 id 之后会被
+      //      render / syncHandDOM 当作「已离手」，所以不会闪回原位；
+      //   ③ 摘不掉（无布局环境）→ 退化为隐藏，落地再恢复。
+      //   批量弃牌时只有第一张做离手预测，其余牌沿用已经开始的合拢，避免重复位移。
+      let hiddenFallback = false;
+      if (handCardEl) {
+        let detached = false;
+        if (!opts.keepInHand && dest !== 'hand' &&
+            typeof this.predictHandDeparture === 'function') {
+          try { detached = !!this.predictHandDeparture(handCardEl); }
+          catch (e) { detached = false; }
+        }
+        if (!detached && handCardEl.style) {
+          handCardEl.style.visibility = 'hidden';
+          hiddenFallback = true;
+        }
+      }
 
       const start = () => {
+        // inline longhand 覆盖 .moving 简写里的 transition-delay:0
+        if (opts.delay) fly.style.transitionDelay = opts.delay + 'ms';
         fly.classList.add('moving');
         if (targetRect) {
           fly.style.left = targetRect.left + 'px';
@@ -2023,9 +2386,17 @@
         setTimeout(() => {
           arrive();
 
-          // 兜底：若调用方这次没有立刻 render 重建手牌，别把原牌永久藏起来
-          if (handCardEl && handCardEl.style && handCardEl.parentNode) {
-            handCardEl.style.visibility = '';
+          // ★ 原牌只在「摘不掉节点」的兜底分支里才需要恢复可见。
+          //   正常路径已经把手牌里那张真节点摘掉了（predictHandDeparture），
+          //   这里再去改 visibility 没有意义，反而会在客机上演成
+          //   「飞牌落地 → 原位闪一下原牌 → 下一秒快照才把它删掉」。
+          //   兜底分支也延后一轮 macrotask：那时调用方的 removeCard + render
+          //   已经跑完，相同的 data-id 节点被复用 / 移除，恢复才不会露馅。
+          if (hiddenFallback && handCardEl && handCardEl.style) {
+            const node = handCardEl;
+            setTimeout(() => {
+              try { node.style.visibility = ''; } catch (e) { /* 节点已移除 */ }
+            }, 0);
           }
 
           // ① 展示区真牌恢复可见（飞牌从头到尾就是它的替身，位置尺寸一致）
@@ -2116,22 +2487,55 @@
       });
 
       // ② 新牌入场 + 重排（render 末尾已经调过 layoutHand）
-      if (typeof opts.commit === 'function') opts.commit();
-      else cards.forEach((c) => player.hand.push(c));
+      // ★ viewOnly：客机视图由权威快照驱动，状态已经同步好，绝不能在这里
+      //   再次 push / render 改视图；只借用本方法的「隐藏真牌 + 从牌堆飞入
+      //   最终格子」动画，于是手牌整理与飞牌在同一帧内完成。
+      if (!opts.viewOnly) {
+        if (typeof opts.commit === 'function') opts.commit();
+        else cards.forEach((c) => player.hand.push(c));
+      }
       // ★ 本方法下面自己做旧牌 FLIP 让位（还要配合隐藏新牌），
       //   临时抑制 render() 的自动 FLIP，避免同一批 DOM 被 invert 两次。
-      this._handFlipSuppress = true;
-      try { this.render(game); } finally { this._handFlipSuppress = false; }
-      this.layoutHand(player.hand.length);
+      if (!opts.viewOnly) {
+        this._handFlipSuppress = true;
+        try { this.render(game); } finally { this._handFlipSuppress = false; }
+      }
+      this.layoutHand(this.visibleHand(player.hand).length);
 
       const newIds = cards.map((c) => String(c.id));
-      const after = list();
+      let after = list();
       const newEls = {};
       after.forEach((el) => {
         const id = el.dataset && el.dataset.id;
         if (id && newIds.indexOf(String(id)) >= 0) newEls[String(id)] = el;
       });
-      if (!after.length) return true;   // 极端无布局环境：commit 已完成即可
+      // ★ viewOnly 的关键兜底：主机给远端摸牌时是【落地之后】才把牌入队，
+      //   所以客机收到 fx 时快照里还没有这几张牌，手牌区自然也没有它们的
+      //   真 DOM。没有节点就飞不了 —— 这正是「客机得牌飞牌消失」的根因。
+      //   这里临时插一张同款预测节点当作替身，动画结束后留在原地等快照
+      //   覆盖（syncHandDOM 按 data-id 会复用它），视觉上与主机完全一致。
+      if (opts.viewOnly) {
+        const missing = cards.filter((c) => !newEls[String(c.id)]);
+        if (missing.length) {
+          missing.forEach((c) => {
+            const holder = document.createElement('div');
+            holder.innerHTML = this.cardHTML(c);
+            const node = holder.firstElementChild ||
+              (holder.children && holder.children[0]) || holder.firstChild;
+            if (!node) return;
+            // ★ 绝对不要写 node.dataset = node.dataset || {}：
+            //   dataset 只有 getter，而 class 方法体是严格模式，
+            //   这一句会抛 TypeError，让整个 async 方法静默 reject ——
+            //   表现就是「客机得牌完全没有飞牌动画」，且控制台只有一条
+            //   没人 catch 的 Promise 拒绝。
+            if (node.dataset) node.dataset.predict = '1';
+            handEl.appendChild(node);
+            newEls[String(c.id)] = node;
+          });
+          after = list();
+          this.layoutHand(this.visibleHand(player.hand).length + missing.length);
+        }
+      }
 
       // ③ 起点：展示区中央（摸牌）或目标角色框（顺手牵羊）
       const sr = opts.sourceRect || R($('table-card')) || R(app);
@@ -2142,6 +2546,12 @@
         const id = el.dataset && el.dataset.id;
         const f = id && firstRects[id];
         if (!f || newIds.indexOf(String(id)) >= 0) return;   // 新牌不参与让位
+        // ★ 正在飞行中的牌（visibility:hidden，等飞牌落地才恢复）不要参与让位：
+        //   它是上一次 flyCard 刚插进来的预测节点，此刻完全看不见，做过渡纯属浪费；
+        //   更糟的是它会带上本轮 invert 的 transform，导致「上一次飞牌起飞那一帧
+        //   量到的落点 = 过渡中的旧坐标」，落地后再弹回真实格子（连摸两张时
+        //   第一张会向左跳 ~70px）。隐藏节点直接跳过，让它按布局瞬移。
+        if (el.style && el.style.visibility === 'hidden') return;
         const r = R(el);
         if (!r || !r.width) return;
         const dx = f.left - r.left, dy = f.top - r.top;
@@ -2153,23 +2563,39 @@
       });
 
       // ⑤ 新牌：正面克隆飞入自己的最终格子（逐张错开起飞）
+      // ★ 量不到真牌矩形时（手牌区刚被清空 / 节点还没布局）按「接在末尾」
+      //   估算落点，绝不 return —— 那会变成「客机得牌一张飞牌都没有」。
+      const handRect = R(handEl) || { left: 0, top: 0, width: 0, height: 0 };
+      let sample = null;
+      try {
+        sample = typeof document.querySelector === 'function'
+          ? R(document.querySelector('#me-hand .card')) : null;
+      } catch (e) { sample = null; }
+      const fallbackW = (sample && sample.width) || (sr && sr.width) || 60;
+      const fallbackH = (sample && sample.height) || (sr && sr.height) || 84;
       const flies = [];
       cards.forEach((c, i) => {
         const el = newEls[String(c.id)];
-        if (!el) return;
-        const r = R(el);
-        if (!r || !r.width) return;
-        el.style.visibility = 'hidden';
+        const r = el ? R(el) : null;
+        const target = (r && r.width && r.height)
+          ? { left: r.left, top: r.top, width: r.width, height: r.height }
+          : {
+              left: this.handAppendX(fallbackW, handRect),
+              top: handRect.top + (handRect.height - fallbackH) / 2,
+              width: fallbackW, height: fallbackH
+            };
+        if (el && el.style) el.style.visibility = 'hidden';
         const fly = document.createElement('div');
         fly.className = 'fly-card drawing';
-        fly.style.left = (sr.left + sr.width / 2 - r.width / 2) + 'px';
-        fly.style.top = (sr.top + sr.height / 2 - r.height / 2) + 'px';
-        fly.style.width = r.width + 'px';
-        fly.style.height = r.height + 'px';
+        fly.style.left = (sr.left + sr.width / 2 - target.width / 2) + 'px';
+        fly.style.top = (sr.top + sr.height / 2 - target.height / 2) + 'px';
+        fly.style.width = target.width + 'px';
+        fly.style.height = target.height + 'px';
         fly.style.zIndex = String(21 + i);
         fly.innerHTML = this.cardHTML(c);      // ★ 正面朝上，不再用牌背
         app.appendChild(fly);
-        flies.push({ fly, el, left: r.left, top: r.top, delay: i * 110 });
+        flies.push({ fly, el, left: target.left, top: target.top,
+          delay: (opts.delay || 0) + i * 110 });
       });
 
       // ⑥ 双 rAF：先让 invert / 起点样式落地，再一起播放
@@ -2179,6 +2605,21 @@
           el.style.transform = 'translate(0,0)';
         });
         flies.forEach((rec) => {
+          // ★ 终点（位置与尺寸）在真正起飞这一帧再量一次：客机连摸多张时，
+          //   每张牌是一次独立的飞牌调用，后一张入队会让手牌整体重排
+          //   （牌宽 / 格子都会变），用调用时量到的旧坐标就会「几张牌叠在
+          //   一起再各自弹开」。这里以起飞瞬间的真实格子为准，尺寸变化交给
+          //   .fly-card.moving 的 width / height 过渡平滑吃掉。
+          if (rec.el && typeof rec.el.getBoundingClientRect === 'function') {
+            const nr = rec.el.getBoundingClientRect();
+            if (nr && nr.width) {
+              rec.left = nr.left; rec.top = nr.top;
+              if (nr.height) {
+                rec.fly.style.width = nr.width + 'px';
+                rec.fly.style.height = nr.height + 'px';
+              }
+            }
+          }
           rec.fly.style.transitionDelay = rec.delay + 'ms';
           rec.fly.classList.add('moving');
           rec.fly.style.left = rec.left + 'px';
@@ -2191,7 +2632,7 @@
         } else { start(); resolve(); }
       });
 
-      await SGS.sleep((cards.length - 1) * 110 + 520);
+      await SGS.sleep((opts.delay || 0) + (cards.length - 1) * 110 + 520);
 
       // ⑦ 落地清理：真牌恢复、飞牌移除、FLIP 内联样式清空
       flies.forEach(({ fly, el }) => {
@@ -2425,6 +2866,24 @@
             label: '重铸【铁索连环】',
             onClick: () => this.finish({ type: 'reforge', card: card })
           });
+        } else if (card && pd.player) {
+          // ★【连环】：♣ 牌可直接当【铁索连环】重铸（装备区素材另走技能按钮）
+          const cv = ((pd.player.skill && pd.player.skill.conversions) || []).find((c) =>
+            c.reforge && c.to === 'tiesuolianhuan' &&
+            (c.scenes || ['play']).indexOf('play') >= 0 &&
+            SGS.Cards.matchesFrom(card, c.from) &&
+            typeof pd.player.canUseAsType === 'function' &&
+            pd.player.canUseAsType(card, c.to)
+          );
+          if (cv) {
+            list.push({
+              label: '重铸【铁索连环】',
+              onClick: () => this.finish({
+                type: 'reforge', card: card, viaSkill: true,
+                conversion: cv, scene: 'play'
+              })
+            });
+          }
         }
         // ★ 全部技能按钮：可发动的可点，被动 / 条件不满足的灰色占位
         pushSkillButtons(list, this, pd, 'play', null);
@@ -2573,9 +3032,19 @@
             cls: 'primary',
             disabled: !usable,
             onClick: () => this.confirmSkill()
-          },
-          { label: '取消', onClick: () => this.cancelSkill() }
+          }
         ];
+        // ★【连环】♣ 牌（含装备区的牌）当【铁索连环】重铸
+        if (usable && conv && conv.reforge && conv.to === 'tiesuolianhuan' && pd.card) {
+          list.push({
+            label: '重铸【铁索连环】',
+            onClick: () => this.finish({
+              type: 'reforge', card: pd.card, viaSkill: true,
+              conversion: conv, scene: pd.scene
+            })
+          });
+        }
+        list.push({ label: '取消', onClick: () => this.cancelSkill() });
         pushSkillButtons(list, this, pd, pd.scene, pd.respondNeed,
           { forceDisabled: true, noShaCount: !!pd.noShaCount });
         this.setActions(list, { noSkillPlaceholder: true });
@@ -2641,6 +3110,17 @@
     }
 
     /* ---------------- 「可以」类主动技能按钮 ---------------- */
+
+    /**
+     * ★ 一次性主动技按钮（当前只有【涅槃】）：不进入选牌转化流程，
+     * 直接把 {type:'skillAction'} 回传给 Game（出牌阶段 / 濒死都走同一个
+     * 入口）。规则层会复核场景与「每局一次」，重复点击不会再生效。
+     */
+    invokeSkillAction(pd, scene, name) {
+      if (!pd || !pd.player) return;
+      if (!SGS.canUseSkillAction(pd.player, name, scene)) return;
+      this.finish({ type: 'skillAction', name: name, scene: scene });
+    }
 
     /** ① 点技能按钮：进入「选牌 → 转化」流程。skillName 是点的那一个技能 */
     openSkill(pd, scene, skillName) {
@@ -3862,21 +4342,21 @@
       return new Promise((resolve) => {
         this.pending = {
           mode: 'trick', player: user, target, trickCard, game, resolve,
-          selected: multi ? [] : null, justPicked: null, auto: !user.isHuman,
+          selected: multi ? [] : null, justPicked: null, auto: !SGS.isDecider(user),
           excludeDelayed: excludeDelayed, need: need, multi: multi,
           handOnly: !!opts.handOnly, onlySuit: opts.onlySuit || null,
           horseOnly: !!opts.horseOnly,
           allowCancel: !!opts.allowCancel,
           customHint: opts.hint || null
         };
-        this.setHint(user.isHuman
+        this.setHint(SGS.isDecider(user)
           ? (opts.hint || ('【' + trickCard.name + '】：在上方目标牌区（手牌 / 装备 / 判定区）选一张牌。'))
           : '对方正在使用【' + trickCard.name + '】…');
         this.refreshActions();
         this.render(game);
         this.renderTargetPanel();
 
-        if (!user.isHuman) {
+        if (!SGS.isDecider(user)) {
           SGS.sleep(650).then(() => {
             const cur = this.pending;
             if (!cur || cur.mode !== 'trick' || !cur.auto) return;

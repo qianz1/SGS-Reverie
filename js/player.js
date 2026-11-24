@@ -44,8 +44,34 @@
     /** 【火攻】对目标造成伤害后触发（【火计】观看牌数递减） */
     onHuogongDamage(game, player) {
       return undefined;
+    },
+    /** 【铁索连环】可额外指定的目标数（【连环】+1 → 最多 3 名） */
+    chainTargetBonus(player) {
+      return 0;
     }
   };
+
+  /**
+   * ★ 把一个派生技能合并进玩家专属的 skill 视图。
+   * conversions / actions 追加，titles / desc 拼接，其余字段覆盖；
+   * char.skill 本身绝不改动（同一角色可能被两个玩家同时使用）。
+   */
+  function mergeSkillView(base, fragment) {
+    const out = Object.assign({}, base || {});
+    Object.keys(fragment || {}).forEach((key) => {
+      if (key === 'name' || key === 'fragments') return;
+      if (key === 'conversions' || key === 'actions') {
+        out[key] = (out[key] || []).concat(fragment[key] || []);
+      } else if (key === 'titles' || key === 'desc') {
+        // 选将介绍里用 ☆ 标「尚未获得」；真正获得后去掉星号
+        const part = String(fragment[key] || '').replace(/^\u2606/, '');
+        out[key] = (out[key] ? out[key] + (key === 'titles' ? ' · ' : '｜') : '') + part;
+      } else {
+        out[key] = fragment[key];
+      }
+    });
+    return out;
+  }
 
   class Player {
     /**
@@ -80,10 +106,39 @@
       this.jianyingUsed = false;     // 【渐营】出牌阶段限一次转化
       this.turnDamageCount = 0;      // 【矢北】本回合受到伤害的次数（所有角色每回合重置）
       this.shibeiHealed = false;     // 【矢北】本回合第一次伤害是否已回血
+      // ★ 涅槃这类「局中获得」的技能：只改本玩家专属视图，不动 char.skill
+      this.acquiredSkills = [];      // 已获得的派生技能名（联机快照也用它同步）
+      this.usedSkillActions = {};    // 限定技等一次性技能：{ 技能名: true }
+      this._skillView = null;
     }
 
+    /** 角色当前生效的技能集合：基础技能 + 本玩家已获得的派生技能 */
     get skill() {
-      return this.char.skill || {};
+      return this._skillView || (this.char && this.char.skill) || {};
+    }
+
+    /** 是否已拥有某技能（含基础技能与涅槃三选一获得的技能） */
+    hasSkill(name) {
+      if (!name) return false;
+      if ((this.acquiredSkills || []).indexOf(name) >= 0) return true;
+      const sk = this.skill;
+      const names = String((sk && (sk.titles || sk.name)) || '')
+        .split(/[\u00b7|\uff5c\s\u3001,]+/).map((x) => x.trim());
+      return names.indexOf(name) >= 0;
+    }
+
+    /**
+     * 局中获得一个派生技能（当前用于【涅槃】三选一）。
+     * 定义写在角色文件的 skill.fragments[name]，重复获得直接忽略。
+     */
+    acquireSkill(name) {
+      const base = this.char && this.char.skill;
+      if (!name || !base || !base.fragments || !base.fragments[name]) return false;
+      if (this.hasSkill(name)) return false;
+      if (!this.acquiredSkills) this.acquiredSkills = [];
+      this.acquiredSkills.push(name);
+      this._skillView = mergeSkillView(this._skillView || base, base.fragments[name]);
+      return true;
     }
 
     /** 调用技能钩子；角色未实现时回落到默认规则 */

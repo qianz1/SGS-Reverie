@@ -110,7 +110,9 @@
     '火计': 'HuoJi',
     '看破': 'KanPo',
     '八阵': 'BaZhen',
-    '藏拙': 'CangZhuo'
+    '藏拙': 'CangZhuo',
+    '连环': 'LianHuan',
+    '涅槃': 'NiePan'
   };
 
   let bgm = null;

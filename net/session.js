@@ -24,9 +24,10 @@
   const CFG_KEY = 'sgs_net_cfg_v1';
 
   /* ================= 配置 ================= */
+  // ★ 固定公共 broker，不再让用户输入地址；TURN 兜底整体移除，
+  //   只保留 STUN 打洞（打不通就明确提示，不再悄悄绕中继）。
   const DEFAULTS = {
-    brokerUrl: '', appId: 'sanguosha',
-    turnUrl: '', turnUser: '', turnCred: ''
+    brokerUrl: 'wss://broker-cn.emqx.io:8084/mqtt', appId: 'sanguosha'
   };
   const Config = Net.Config = {
     DEFAULTS: DEFAULTS,
@@ -39,16 +40,13 @@
     },
     save(cfg) {
       try { global.localStorage && global.localStorage.setItem(CFG_KEY,
-        JSON.stringify({ brokerUrl: cfg.brokerUrl || '', appId: cfg.appId || 'sanguosha',
-          turnUrl: cfg.turnUrl || '', turnUser: cfg.turnUser || '',
-          turnCred: cfg.turnCred || '' })); } catch (e) {}
+        JSON.stringify({ appId: cfg.appId || 'sanguosha' })); } catch (e) {}
     },
     fromUrl() {
       const out = {};
       try {
         const q = new URLSearchParams(global.location ? global.location.search : '');
-        [['broker', 'brokerUrl'], ['appid', 'appId'], ['room', 'room'],
-         ['turn', 'turnUrl'], ['turnuser', 'turnUser'], ['turncred', 'turnCred']]
+        [['broker', 'brokerUrl'], ['appid', 'appId'], ['room', 'room']]
           .forEach(([k, v]) => { if (q.get(k)) out[v] = q.get(k); });
       } catch (e) {}
       return out;
@@ -65,8 +63,24 @@
   };
   Net.WAIT_INDEX = WAIT_INDEX;
 
+  /**
+   * ★ 要同步给客机的「表现层」方法。刻意用白名单而不是全量转发：
+   *   render / refreshActions / setHint / log 已由快照与日志帧驱动；
+   *   showStartScreen / bindGame 等启动方法绝不能在客机 battle 里重放。
+   *   animateDraw 单独处理（对手摸牌必须显示牌背，不能外泄牌面）。
+   */
+  const FX_METHODS = [
+    'skillFX', 'playDeathVoice',
+    'showTableCard', 'showDeathDiscard', 'showJudgeCard', 'markJudgeResult',
+    'clearTableCard', 'flyCard', 'flyCards', 'animateDraw',
+    'showTargetLine', 'showTargetLines', 'showHitFX', 'shakeHero',
+    'openWugu', 'setWuguTurn', 'markWuguTaken', 'closeWuguPanel',
+    'closePeekPanel', 'closeTargetPanel'
+  ];
+  Net.FX_METHODS = FX_METHODS;
+
   class RouterUI {
-    constructor(localUI, remoteUI) {
+    constructor(localUI, remoteUI, broadcast) {
       this.localUI = localUI;
       this.remoteUI = remoteUI;
       const self = this;
@@ -76,7 +90,12 @@
         if (typeof proto[name] !== 'function') return;
         self[name] = function () {
           const fn = localUI[name];
-          return typeof fn === 'function' ? fn.apply(localUI, arguments) : undefined;
+          const r = typeof fn === 'function' ? fn.apply(localUI, arguments) : undefined;
+          // ★ 主机播完自己的动画后，把同一次调用转发给客机重放
+          if (broadcast && FX_METHODS.indexOf(name) >= 0) {
+            try { broadcast(name, Array.prototype.slice.call(arguments)); } catch (e) {}
+          }
+          return r;
         };
       });
       Object.keys(WAIT_INDEX).forEach((name) => {
@@ -161,6 +180,13 @@
       this.started = false;
       this._snapTimer = null;
       this._frameQueue = [];
+      // ★ fx / snap 同事务序号：主机广播一次表现就递增 _tx，并把带同一 tx
+      //   的快照先于 fx 发出；客机按 _appliedTx 缓存并按序重放，避免快照
+      //   重建 DOM 打断正在播放的动画。
+      this._tx = 0;
+      this._fxQueue = [];
+      this._appliedTx = 0;
+      this._lastSnap = null;
       const self = this;
 
       this.sig = new Net.Signaling({
@@ -174,16 +200,21 @@
       this.sid = this.sig.sid;
       this.transport = new Net.Transport({
         role: this.role, sid: this.sid,
-        iceServers: Net.defaultIceServers({
-          url: this.cfg.turnUrl, username: this.cfg.turnUser,
-          credential: this.cfg.turnCred
-        }),
+        iceServers: Net.defaultIceServers(),
         RTCPeerConnectionImpl: opts.RTCPeerConnectionImpl,
         onSignal: (type, data) => self.sig.sendSignal(type, data),
         onOpen: () => { self.onState('channel:open'); self.flushFrames(); },
         onClose: (why) => self.onState('channel:close', { why: why }),
         onMessage: (m) => self.onFrame(m),
-        onLink: (info) => self.onLink(info)
+        // ★ 两端各自 getStats() 的 local candidate 是镜像的，直接各显示各的
+        //   会出现「一边局域网直连、一边公网打洞」。统一由主机测一次，
+        //   再随帧下发给客机，两边永远显示同一条链路结论。
+        onLink: (info) => {
+          if (self.role === 'host') {
+            self.onLink(info);
+            self.send({ t: 'link', info: info });
+          }
+        }
       });
       // 主机固定 offerer —— 1v1 无 glare
       if (this.role === 'host') {
@@ -232,11 +263,13 @@
         case 'ask': this.onAsk(m); break;
         case 'act': this.onActFrame(m); break;
         case 'log': this.onLogFrame(m); break;
+        case 'fx': this.onFxFrame(m); break;
+        case 'link': if (this.role === 'guest') this.onLink(m.info); break;
         case 'over': this.onOver(m); break;
         default: break;
       }
     }
-    onChar() {} onInit() {} onSnap() {} onAsk() {}
+    onChar() {} onInit() {} onSnap() {} onAsk() {} onFxFrame() {}
     onActFrame() {} onOver() {}
     onLogFrame(m) {
       try { if (this.ui && typeof this.ui.log === 'function') this.ui.log(m.m, m.c); }
@@ -246,6 +279,11 @@
     /** 选将完成：把角色发给对端；两边齐了才开局 */
     startGame(charId) {
       this.myCharId = charId;
+      // ★ 联机在等对端选将 / 开局期间，沿用战斗界面氛围底图当等候界面，
+      //   只把 #app 里写死的占位换成真实状态（自己选的将 / 对方隐藏 / 160 张）。
+      if (NetUI && NetUI.showWait) {
+        try { NetUI.showWait(this.ui, charId, this.role, this.room); } catch (e) {}
+      }
       this.send({ t: 'char', charId: charId, role: this.role });
       if (this.role === 'host') this.maybeBegin();
       else this.onState('waiting-host');
@@ -255,7 +293,13 @@
     close() {
       try { this.sig.close(); } catch (e) {}
       try { this.transport.close(); } catch (e) {}
+      (this._fxQueue || []).forEach((r) => { if (r.timer) clearTimeout(r.timer); });
+      this._fxQueue = [];
       this.ui.onRender = null; this.ui.onLog = null;
+      if (NetUI) {
+        NetUI.linkSuffix = '';
+        if (NetUI.hideWait) { try { NetUI.hideWait(); } catch (e) {} }
+      }
     }
   }
   Net.Session = Session;
@@ -281,8 +325,50 @@
     }
     begin() {
       this.started = true;
+      if (NetUI && NetUI.hideWait) { try { NetUI.hideWait(); } catch (e) {} }
       const ui = this.ui;
-      const router = new RouterUI(ui, this.remoteUI);
+      const self0 = this;
+      const router = new RouterUI(ui, this.remoteUI, (name, args) => {
+        const safe = args.slice();
+        // animateDraw 的第 3 个参数是 Game，其余表现事件的第 3 个是 opts
+        const opts = (name !== 'animateDraw' && safe[2] &&
+          typeof safe[2] === 'object' && !Array.isArray(safe[2])) ? safe[2] : {};
+        const game = self0.game;
+        // ★★ 正反面的唯一口径：先提炼「提供者 / 获得者」座位，再对【每一个】
+        //   收件人单独判定能不能看正面（P.canSeeFxFace）。绝不「算一次就群发」——
+        //   多人局里那样必然串味：一份 frame 只能带一个 hide 标志，
+        //   而「能不能看正面」本来就是因人而异的。
+        //   座位号是全局唯一的，因此这条判断与视角、人数、谁是房主都无关。
+        const seats = P.fxFaceSeats(name, safe, {
+          localSeat: game && game.human ? game.human.seat : null,
+          remoteSeats: self0.recipientSeats()
+        });
+        const toHand = name === 'animateDraw' ||
+          opts.dest === 'hand' || opts.dest === 'ai-hero';
+        // ★ 同事务：先推一份当前权威快照，再发 fx。DataChannel 可靠有序，
+        //   客机一定先应用视图状态、再重放动画，不会被随后到达的快照重建打断。
+        const tx = ++self0._tx;
+        self0.pushSnapshot(true);
+        self0.recipientSeats().forEach((seat) => {
+          const seeFace = P.canSeeFxFace(seat, seats.providerSeat,
+            seats.receiverSeat, seats.publicFace);
+          // 进手牌区（摸牌 / 获得牌）：只有提供者与获得者看正面，其余人一律牌背。
+          // 展示区亮牌 / 弃牌（没有获得者）：沿用 opts.faceDown 声明，
+          // 但提供者自己永远看正面 —— 他本来就知道这张牌是什么。
+          const hide = toHand ? !seeFace
+            : (!!opts.faceDown && !(seats.providerSeat != null &&
+                String(seats.providerSeat) === String(seat)));
+          // 每个收件人各自一份参数副本，牌面按需替换成牌背（互不影响）
+          const out = safe.slice();
+          if (hide && out[0]) out[0] = P.hideCardFaces(out[0]);
+          // ★ recv（获得者）+ src（提供者）随帧下发：客机拿这两个座位号
+          //   自己再判一次，不依赖任何坐标 / 落点约定，换视角也不会错。
+          self0.send({ t: 'fx', tx: tx, m: name, hide: !!hide,
+            recv: seats.receiverSeat, src: seats.providerSeat, to: seat,
+            pub: seats.publicFace ? 1 : 0,
+            a: P.packFxArgs(out, game, seat) });
+        });
+      });
       const game = new SGS.Game(ui, this.myCharId, {
         mode: '1v1', remote: true, remoteCharId: this.remoteCharId,
         uiRouter: router
@@ -308,12 +394,27 @@
         self.send({ t: 'over', hostWon: hostWon });
       }).catch(() => {});
     }
+    /**
+     * ★ 表现层帧的收件人座位列表。
+     *   当前是「1 主机 + 1 客机」，只有一个远端座位；多人局把其余远端座位
+     *   一并放进这个数组即可 —— 每个收件人的正反面由 P.canSeeFxFace 逐个
+     *   判定、各自打包一份参数，不存在「一份 frame 群发导致串味」的问题。
+     *   快照同理：pushSnapshot 也是按座位各生成、各下发一份。
+     *   （前提：send 支持按座位定向发送。）
+     */
+    recipientSeats() {
+      return this.remoteSeat != null ? [this.remoteSeat] : [];
+    }
     pushSnapshot(immediate) {
       if (!this.game) return;
       const self = this;
       const emit = () => {
         self._snapTimer = null;
-        self.send({ t: 'snap', snap: P.makeSnapshot(self.game, self.remoteSeat) });
+        // ★ 按座位各裁剪一份：客机只能看见自己该看见的那部分
+        self.recipientSeats().forEach((seat) => {
+          self.send({ t: 'snap', tx: self._tx, to: seat,
+            snap: P.makeSnapshot(self.game, seat) });
+        });
       };
       if (this._snapTimer) clearTimeout(this._snapTimer);
       if (immediate) emit(); else this._snapTimer = setTimeout(emit, 24);
@@ -328,9 +429,14 @@
       super(Object.assign({ role: 'guest' }, opts));
       this.viewGame = P.makeViewGame(this.ui);
       this._askQueue = [];
+      // ★ 视图模式：UI 的所有 render（含 ask 触发的那些）都只做 keyed diff，
+      //   不重建 #me-hand —— 这样飞牌替身 / FLIP 不会被半路打断。
+      if (this.ui) this.ui._netView = true;
     }
     onInit(m) {
+      if (NetUI && NetUI.hideWait) { try { NetUI.hideWait(); } catch (e) {} }
       this.mySeat = m.seat;
+      NetUI.linkSuffix = NetUI.linkSuffix || '';
       this.hostCharId = m.hostCharId;
       this.viewGame.viewerSeat = m.seat;
       this.ui.bindGame(this.viewGame);
@@ -343,12 +449,189 @@
     onSnap(m) {
       if (!this.mySeat && !(m.snap && m.snap.viewerSeat)) return;
       const seat = this.mySeat || m.snap.viewerSeat;
+      const prev = this._lastSnap;
       P.applySnapshot(this.viewGame, m.snap);
       this.viewGame.viewerSeat = seat;
-      try { this.ui.render(this.viewGame); } catch (e) {}
-      // 五谷面板由快照驱动重绘
-      if (this.ui.wuguSession && typeof this.ui.renderWuguPanel === 'function') {
-        try { this.ui.renderWuguPanel(); } catch (e) {}
+      // ★ 差量渲染：按牌 id 复用未变化的 DOM 节点，只更新真正变了的区域，
+      //   避免每次快照都整块重建 #me-hand 导致 CSS 过渡 / 飞牌被打断。
+      try {
+        if (typeof this.ui.renderPatch === 'function' && typeof document !== 'undefined' &&
+            typeof document.querySelectorAll === 'function') {
+          this.ui.renderPatch(this.viewGame, prev, m.snap);
+        } else this.ui.render(this.viewGame);
+      } catch (e) {
+        try { this.ui.render(this.viewGame); } catch (e2) {}
+      }
+      this._lastSnap = m.snap;
+      // ★ 先应用快照再放行同事务 fx：动画基于最新视图状态计算落点。
+      this._appliedTx = Math.max(this._appliedTx, m.tx || 0);
+      this._drainFx();
+      // ★ 五谷面板由快照驱动：主机 openWugu → 客机建 session；
+      //   主机 closeWuguPanel → wugu 变 null → 客机自动收起（修「不自动关」）。
+      if (m.snap.wugu) {
+        if (!this.ui.wuguSession && typeof this.ui.openWugu === 'function') {
+          try { this.ui.openWugu(this.viewGame, m.snap.wugu.cards.slice()); } catch (e) {}
+        }
+        if (this.ui.wuguSession && typeof this.ui.renderWuguPanel === 'function') {
+          try { this.ui.renderWuguPanel(); } catch (e) {}
+        }
+      } else if (this.ui.wuguSession && typeof this.ui.closeWuguPanel === 'function') {
+        try { this.ui.closeWuguPanel(); } catch (e) {}
+      }
+    }
+    onFxFrame(m) {
+      // init 之前的表现事件先排队，viewGame 建好后按序补放
+      if (!this.mySeat) { this._askQueue.push(m); return; }
+      // ★ 同事务排序：快照还没到的 fx 先缓存；120ms 兜底强制播放，
+      //   避免主机某次表现没有伴随 render 时永久挂起。
+      if (m.tx && m.tx > this._appliedTx) {
+        const rec = { m: m, timer: null };
+        rec.timer = setTimeout(() => {
+          const i = this._fxQueue.indexOf(rec);
+          if (i >= 0) { this._fxQueue.splice(i, 1); this.replayFx(m); }
+        }, 120);
+        this._fxQueue.push(rec);
+        return;
+      }
+      this.replayFx(m);
+    }
+    /** 快照应用后，放行所有 tx 已就绪的 fx（保持原来的先后顺序） */
+    _drainFx() {
+      if (!this._fxQueue.length) return;
+      const ready = this._fxQueue.filter((r) => !(r.m.tx > this._appliedTx));
+      if (!ready.length) return;
+      this._fxQueue = this._fxQueue.filter((r) => ready.indexOf(r) < 0);
+      ready.forEach((r) => {
+        if (r.timer) clearTimeout(r.timer);
+        this.replayFx(r.m);
+      });
+    }
+    replayFx(m) {
+      const vg = this.viewGame;
+      // ★★ 正反面的绝对判据：座位号直接比（P.canSeeFxFace）。
+      //   只有「牌的提供者」和「获得者」看正面，其他人一律牌背。
+      //   绝不再用「谁是 vg.human / aiPlayer」去猜 —— 那只在 1v1 成立，
+      //   多人局里第三、第四个玩家会被判错（白看牌面 / 自己拿的牌却显示牌背）。
+      //   老主机不带 src/recv 时才回退到按角色对象比对（兼容旧房间）。
+      const selfPlayer = vg && vg.human;
+      const isMine = (p) => {
+        if (!p || p.seat == null || !vg) return false;
+        const all = vg.players || [];
+        const match = all.find((x) => String(x.seat) === String(p.seat));
+        const who = match || p;             // 与场上所有角色比对
+        return !!selfPlayer && (who === selfPlayer ||
+          String(who.seat) === String(selfPlayer.seat) ||
+          String(who.seat) === String(vg.viewerSeat));
+      };
+      // 座位号齐备 → 绝对判定；否则 null（调用方回退到旧比对方式）
+      // publicFace = 这张牌全场公开（五谷亮牌 / 装备区·判定区明牌）→ 人人正面
+      const seatSays = (srcSeat, recvSeat, publicFace) =>
+        (srcSeat == null && recvSeat == null)
+          ? (publicFace ? true : null)
+          : P.canSeeFxFace(this.mySeat, srcSeat, recvSeat, publicFace);
+      // 我是不是获得者（决定落点：飞进我的手牌区 / 飞向别人的区域）
+      const seatIsMe = (s) => s != null && this.mySeat != null &&
+        String(s) === String(this.mySeat);
+      let args;
+      try { args = P.unpackFxArgs(m.a, vg, this.mySeat, m.hide); }
+      catch (e) {
+        // 不再让异常被 transport 静默吞掉：至少留一条可查的告警
+        if (typeof console !== 'undefined' && console.warn) {
+          try { console.warn('[net] fx 解包失败：' + m.m, e); } catch (e2) {}
+        }
+        return;
+      }
+      const ui = this.ui;
+
+      // ★ 摸牌：收牌人 = 自己 → 真牌面正面飞进手牌区；否则牌背飞向对手框。
+      //   不用 ui.animateDraw，避免 flipInsertIntoHand 在客机改视图状态。
+      //   ★ from:'table' 必须带：flyCard 默认按 fromPlayer.isHuman 取起点，
+      //     客机视角下会变成「从手牌区/角色框飞到同一区域」，几乎原地不动，
+      //     看起来就是摸牌没动画。显式指定从中央牌堆起飞才与主机一致。
+      if (m.m === 'animateDraw') {
+        const cards = args[0] || [], player = args[1];
+        const mine = m.recv != null ? seatIsMe(m.recv) : isMine(player);
+        const seatSee = seatSays(null, m.recv, false);
+        // 摸牌没有提供者：只有获得者能看正面
+        const face = (seatSee == null ? mine : seatSee) && !m.hide;
+        cards.forEach((c, i) => {
+          // ★ 多张按 1/3 卡宽错位、逐张错峰起飞，与主机 animateDrawToAI
+          //   的「露出 1 / 盖住 2」叠放观感一致，不再几张完全重叠。
+          try { ui.flyCard(c, player, { from: 'table',
+            dest: mine ? 'hand' : 'ai-hero', faceDown: !face,
+            stackIndex: i, stackCount: cards.length, delay: i * 110 }); } catch (e) {
+            if (typeof console !== 'undefined' && console.warn) {
+              try { console.warn('[net] 摸牌飞牌失败', e); } catch (e2) {}
+            }
+          }
+        });
+        return;
+      }
+
+      // ★ 获得牌（顺手牵羊 / 借刀杀人 / 五谷选牌落入手牌…）：
+      //   落点看「我是不是获得者」，正反面看「提供者/获得者是否是我」，
+      //   两者分开判 —— 被牵的一方是提供者：牌飞向别人，但自己看正面。
+      if ((m.m === 'flyCard' || m.m === 'flyCards') && args[2] &&
+          (args[2].dest === 'hand' || args[2].dest === 'ai-hero')) {
+        const o = args[2];
+        const mine = m.recv != null ? seatIsMe(m.recv) : isMine(o.toPlayer);
+        // ★ 全场公开的牌（五谷亮牌 / 装备区·判定区明牌）→ 谁都能看正面。
+        //   优先读帧上的 pub（主机已按区域 faceUp 判好），再退回参数里的 public。
+        const isPub = m.pub != null ? !!m.pub : !!o.public;
+        const seatSee = seatSays(m.src, m.recv, isPub);
+        const face = (seatSee == null
+          ? (mine || isMine(args[1])) : seatSee) && !m.hide;
+        o.dest = mine ? 'hand' : 'ai-hero';
+        o.faceDown = !face;
+        o.onArrive = null;               // 客机状态只由权威快照决定
+      }
+      // ★ 装备落点是「我方装备栏」，若装装备的是对手（客机视角），
+      //   改成飞向对手角色框，避免飞到客机自己的装备区。
+      if (m.m === 'flyCard' && args[2] && args[2].dest === 'equip' &&
+          args[1] && !args[1].isHuman) {
+        args[2] = Object.assign({}, args[2], { dest: 'ai-hero', faceDown: false });
+      }
+
+      // ★ 视角还原「离手」起点：主机把客机的牌当 AI 手牌（from:'hero'，
+      //   起点画在角色框）。客机看得见自己的手牌，快照里还在的多张牌应改回
+      //   从手牌区那张真卡起飞，并与主机玩家一样让手牌区同步合拢。
+      if ((m.m === 'flyCard' || m.m === 'flyCards') && args[2] &&
+          isMine(args[1]) && args[2].from === 'hero' && vg && vg.human) {
+        const cards0 = m.m === 'flyCards' ? (args[0] || []) : [args[0]];
+        const cardIds = cards0.map((c) => c && c.id != null ? String(c.id) : '');
+        const handIds = (vg.human.hand || []).map((c) => String(c.id));
+        if (cardIds.length && cardIds.every((id) => handIds.indexOf(id) >= 0)) {
+          args[2] = Object.assign({}, args[2]);
+          delete args[2].from;
+        }
+      }
+      // ★ 批量弃牌：主机在玩家侧走 showTableCardsBatch（每张各有落点、同时
+      //   起飞同时落地）。客机视角那位玩家是 aiPlayer，必须显式带 batch，
+      //   否则逐张飞全部落到展示区中央，看起来就是「叠在一起」。
+      if (m.m === 'flyCards' && args[2] &&
+          (args[2].dest || 'showcase') === 'showcase' &&
+          (args[0] || []).length > 1 && !args[2].from && !args[2].faceDown) {
+        args[2] = Object.assign({}, args[2], { batch: true });
+      }
+      const fn = ui && ui[m.m];
+      if (typeof fn !== 'function') return;
+      try {
+        const r = fn.apply(ui, args);
+        // ★ 表现层方法多半是 async（flyCard / flipInsertIntoHand / animateDraw…）。
+        //   这里不 await（动画不能阻塞收帧），但必须接住 rejection：
+        //   否则方法内部一个 TypeError 就会变成「什么都没发生」的哑失败 ——
+        //   之前客机得牌没有飞牌动画，就是 dataset 赋值抛错被这样吞掉的。
+        if (r && typeof r.then === 'function' && typeof r.catch === 'function') {
+          r.catch((e) => {
+            if (typeof console !== 'undefined' && console.warn) {
+              try { console.warn('[net] fx 动画异常：' + m.m, e); } catch (e2) {}
+            }
+          });
+        }
+      } catch (e) {
+        if (typeof console !== 'undefined' && console.warn) {
+          try { console.warn('[net] fx 重放失败：' + m.m, e); } catch (e2) {}
+        }
       }
     }
     onAsk(m) {
@@ -412,27 +695,12 @@
         '<button id="net-toggle" class="net-toggle" type="button">' +
           '<span class="net-dot"></span>联机对战 <em>▼</em></button>' +
         '<div id="net-body" class="net-body hidden">' +
-          '<div class="net-row">' +
-            '<label class="net-fld"><span>Broker WSS</span>' +
-              '<input id="net-broker" type="url" spellcheck="false" ' +
-              'placeholder="wss://your-broker:8084/mqtt" value="' + esc(cfg.brokerUrl) + '"></label>' +
-            '<label class="net-fld net-fld-sm"><span>房间码</span>' +
-              '<input id="net-room" spellcheck="false" maxlength="12" ' +
-              'value="' + esc(cfg.room || '') + '"></label>' +
-          '</div>' +
-          '<div class="net-row net-adv">' +
-            '<label class="net-fld"><span>TURN（可选，打洞失败时兜底）</span>' +
-              '<input id="net-turn" spellcheck="false" placeholder="turn:example.com:3478" ' +
-              'value="' + esc(cfg.turnUrl) + '"></label>' +
-            '<label class="net-fld net-fld-sm"><span>账号 / 密码（可选）</span>' +
-              '<span class="net-pair"><input id="net-turnuser" placeholder="user" value="' +
-                esc(cfg.turnUser) + '"><input id="net-turncred" placeholder="credential" value="' +
-                esc(cfg.turnCred) + '"></span></label>' +
-          '</div>' +
           '<div class="net-row net-actions">' +
+            '<label class="net-fld net-fld-room"><span>房间号</span>' +
+              '<input id="net-room" spellcheck="false" maxlength="12" ' +
+              'placeholder="6 位房间码" value="' + esc(cfg.room || '') + '"></label>' +
             '<button id="net-host" class="net-btn primary" type="button">创建房间</button>' +
             '<button id="net-join" class="net-btn" type="button">加入房间</button>' +
-            '<button id="net-local" class="net-btn ghost" type="button">返回本地对战</button>' +
           '</div>' +
           '<div id="net-status" class="net-status"><i></i><span>未连接 · 默认本地 AI 对战</span></div>' +
         '</div>';
@@ -446,24 +714,31 @@
       const statusEl = $('net-status');
       const sessionRef = { current: null };
 
+      // ★ 链路结论由主机统一下发，单独缓存；任何状态刷新都带上它，
+      //   避免「对局开始」这类提示把链路信息覆盖掉。
+      NetUI.linkSuffix = '';
       const state = (text, cls) => {
         if (!statusEl) return;
         statusEl.className = 'net-status' + (cls ? ' ' + cls : '');
+        const full = text + (NetUI.linkSuffix ? ' · ' + NetUI.linkSuffix : '');
         const span = statusEl.querySelector ? statusEl.querySelector('span') : null;
-        if (span) span.textContent = text;
-        else statusEl.textContent = text;
+        if (span) span.textContent = full;
+        else statusEl.textContent = full;
+        // ★ 联机等候时选将栏已隐藏，状态写到战斗界面左上角（房间码后面）
+        if (NetUI.waiting) {
+          const ri = global.document && global.document.getElementById
+            ? global.document.getElementById('round-info') : null;
+          if (ri) ri.textContent = '房间 ' + (NetUI.roomCode || '') + ' · ' + full;
+        }
       };
       const readCfg = () => ({
-        brokerUrl: ($('net-broker') || {}).value || '',
+        brokerUrl: cfg.brokerUrl || DEFAULTS.brokerUrl,
         appId: cfg.appId || 'sanguosha',
-        room: ($('net-room') || {}).value || '',
-        turnUrl: ($('net-turn') || {}).value || '',
-        turnUser: ($('net-turnuser') || {}).value || '',
-        turnCred: ($('net-turncred') || {}).value || ''
+        room: ($('net-room') || {}).value || ''
       });
       const start = (role) => {
+        NetUI.linkSuffix = '';      // 换房间时清掉上一局的链路结论
         const c = readCfg();
-        if (!c.brokerUrl) { state('请先填写 Broker WSS 地址', 'err'); return; }
         if (role === 'host' && !c.room) { c.room = randomRoom(); $('net-room').value = c.room; }
         if (role === 'guest' && !c.room) { state('请填写要加入的房间码', 'err'); return; }
         Config.save(c);
@@ -478,9 +753,10 @@
           },
           onLink: (info) => {
             const kind = info.kind === 'host' ? '局域网直连'
-              : info.kind === 'srflx' ? '公网打洞' : 'TURN 中继';
+              : info.kind === 'srflx' ? '公网打洞' : '中继';
             const rtt = info.rtt == null ? '' : ' · ' + info.rtt + ' ms';
-            state('已直连 · ' + kind + rtt + '（信令已断也不影响对局）', 'ok');
+            NetUI.linkSuffix = kind + rtt;
+            state('已直连（信令已断也不影响对局）', 'ok');
           }
         });
         sessionRef.current = sess;
@@ -496,18 +772,92 @@
           toggle.classList.toggle('open');
         });
       }
-      [['net-host', () => start('host')], ['net-join', () => start('guest')],
-       ['net-local', () => {
-         if (sessionRef.current) { try { sessionRef.current.close(); } catch (e) {} }
-         sessionRef.current = null; ui._pickNetInfo = null;
-         state('已切回本地 AI 对战');
-       }]].forEach(([id, fn]) => {
+      [['net-host', () => start('host')], ['net-join', () => start('guest')]]
+        .forEach(([id, fn]) => {
         const b = $(id); if (b && b.addEventListener) b.addEventListener('click', fn);
       });
       NetUI.session = sessionRef;
       NetUI.state = state;
       return NetUI;
     }
+  };
+
+  /**
+   * ★ 联机等候界面 = 原来的战斗界面氛围底图（background3.webp / CSS 远景），
+   *   不另盖一层不透明遮罩 —— 用户明确喜欢这套画面。
+   *   只是把「写死的占位」换成真实状态：
+   *     · 右下角角色框 = 自己刚选的角色（立绘 / 势力 / 名字 / 体力都填）
+   *     · 对方角色框空着不显示（整块隐藏，不预设任何对手）
+   *     · 右上角牌堆 = 160 张（整副牌总数）
+   *     · 左上角写房间码 + 实时连接状态
+   *   开局后 hideWait() 复原，之后完全交给 ui.render() 填真实值。
+   */
+  NetUI.showWait = function (ui, charId, role, room) {
+    const doc = global.document;
+    if (!doc || !doc.getElementById) return;
+    const $ = (id) => doc.getElementById(id);
+    NetUI.waiting = true;
+    NetUI.roomCode = room || '';
+    const c = (SGS.Characters || {})[charId] || {};
+    const art = (ui && ui.art && ui.art.characters)
+      ? ui.art.characters[charId] : '';
+    const shown = c.displayName || c.name || charId || '?';
+    const faction = c.faction || '群';
+    const hp = Math.max(1, c.maxHp || 4);
+
+    // ① 对方角色框空着不显示
+    const aiArea = $('ai-area');
+    if (aiArea && aiArea.style) aiArea.style.display = 'none';
+
+    // ② 右下角角色框换成自己选的角色（与局内 render 完全同一套字段）
+    if ($('me-name')) $('me-name').textContent = shown;
+    const ff = $('me-faction');
+    if (ff) { ff.textContent = faction; if (ff.dataset) ff.dataset.faction = faction; }
+    if ($('me-hp') && ui && typeof ui.hpHTML === 'function') {
+      $('me-hp').innerHTML = ui.hpHTML({ char: c, name: shown, hp: hp, maxHp: hp, hand: [] });
+    }
+    if ($('me-count')) $('me-count').textContent = '';
+    if ($('ai-count')) $('ai-count').textContent = '';
+    const meArea = $('me-area'), meArt = $('me-art');
+    if (meArea && meArea.style && typeof meArea.style.setProperty === 'function') {
+      meArea.style.setProperty('--name-scale', (1 / Math.max(1, shown.length)).toFixed(4));
+      meArea.style.setProperty('--hp-pips', String(hp));
+    }
+    if (meArt && meArea) {
+      if (art) {
+        if (meArt.src !== art) meArt.src = art;
+        if (meArt.dataset) meArt.dataset.art = art;
+        if (meArea.classList) meArea.classList.add('has-art');
+      } else if (meArea.classList) {
+        meArea.classList.remove('has-art');
+      }
+    }
+
+    // ③ 右上角牌堆数 = 整副牌 160 张
+    if ($('deck-info')) $('deck-info').textContent = '牌堆 160 张';
+    // ④ 左上角房间码 + 状态；中央一行轻提示
+    if ($('round-info')) $('round-info').textContent =
+      '房间 ' + NetUI.roomCode + ' · ' + (role === 'host' ? '等待对手加入…' : '等待房主开局…');
+    if ($('hint')) $('hint').textContent = '等待对局开始…';
+    // ⑤ 清掉任何残留的手牌 / 展示区 / 操作按钮，保持画面干净
+    ['me-hand', 'table-card', 'actions', 'skill-actions', 'me-judge-marks',
+      'me-equip-area'].forEach((id) => {
+      const e = $(id);
+      if (e && typeof e.innerHTML === 'string') e.innerHTML = '';
+    });
+    const log = $('log'); if (log && typeof log.innerHTML === 'string') log.innerHTML = '';
+  };
+  NetUI.hideWait = function () {
+    NetUI.waiting = false;
+    const doc = global.document;
+    if (!doc || !doc.getElementById) return;
+    const $ = (id) => doc.getElementById(id);
+    // ★ 必须复原对方框的 inline display，否则 render() 之后对手一直不出现
+    const aiArea = $('ai-area');
+    if (aiArea && aiArea.style) aiArea.style.display = '';
+    if ($('hint')) $('hint').textContent = '';
+    if ($('round-info')) $('round-info').textContent = '';
+    if ($('deck-info')) $('deck-info').textContent = '牌堆 160 张';
   };
 
   /** main.js 用的挂载入口（NetUI.attach 的别名，内部只用闭包 NetUI，不依赖 this） */

@@ -200,27 +200,41 @@
       if (!this.pc || typeof this.pc.getStats !== 'function') return null;
       try {
         const stats = await this.pc.getStats();
-        let pair = null;
         const candidates = {};
-        if (stats && typeof stats.forEach === 'function') {
-          stats.forEach((r) => { if (r.type === 'local-candidate' || r.type === 'remote-candidate')
-            candidates[r.id] = r; });
-          stats.forEach((r) => {
-            if (r.type === 'candidate-pair' && (r.nominated || r.selected || r.state === 'succeeded')) pair = r;
-          });
-        } else {
-          // Map 形态
-          for (const r of stats.values()) {
-            if (r.type === 'local-candidate' || r.type === 'remote-candidate') candidates[r.id] = r;
-            if (r.type === 'candidate-pair' && (r.nominated || r.selected || r.state === 'succeeded')) pair = r;
+        let pair = null, fallback = null, last = null;
+        const consider = (r) => {
+          if (!r) return;
+          if (r.type === 'local-candidate' || r.type === 'remote-candidate') {
+            candidates[r.id] = r; return;
           }
+          if (r.type !== 'candidate-pair') return;
+          last = r;
+          const ok = r.state === 'succeeded' || r.nominated || r.selected;
+          if (!ok) return;
+          if (!fallback) fallback = r;
+          // ★ 取「nominated 且 succeeded」的最优 pair，而不是遍历到的最后一个。
+          //   两端 stats 顺序不同会各选到不同 pair —— 这正是之前两边标签
+          //   不一致（一边局域网直连、一边公网打洞）的第二个原因。
+          if ((r.nominated || r.selected) && r.state === 'succeeded') {
+            if (!pair || (r.currentRoundTripTime != null &&
+                (pair.currentRoundTripTime == null ||
+                 r.currentRoundTripTime < pair.currentRoundTripTime))) pair = r;
+          }
+        };
+        if (stats && typeof stats.forEach === 'function') stats.forEach(consider);
+        else if (stats && typeof stats.values === 'function') {
+          for (const r of stats.values()) consider(r);
         }
+        if (!pair) pair = fallback || last;
         if (!pair) return null;
+        // ★ 整条 pair 两端一起判：只取 local 会把 host↔srflx 误标成局域网直连。
         const local = candidates[pair.localCandidateId] || {};
-        const types = [local.candidateType || local.type || ''];
+        const remote = candidates[pair.remoteCandidateId] || {};
+        const types = [local.candidateType || local.type || '',
+                       remote.candidateType || remote.type || ''].join(' ');
         let kind = 'host';
-        if (types.join(' ').indexOf('relay') >= 0) kind = 'relay';
-        else if (types.join(' ').indexOf('srflx') >= 0 || types.join(' ').indexOf('prflx') >= 0) kind = 'srflx';
+        if (types.indexOf('relay') >= 0) kind = 'relay';
+        else if (types.indexOf('srflx') >= 0 || types.indexOf('prflx') >= 0) kind = 'srflx';
         const info = { kind: kind, rtt: pair.currentRoundTripTime != null
           ? Math.round(pair.currentRoundTripTime * 1000) : null };
         this.onLink(info);
@@ -243,13 +257,8 @@
 
   Net.Transport = Transport;
 
-  /** 默认 ICE：官方免费 STUN；TURN 由用户在联机面板填（国内落 relay 会绕境外） */
-  Net.defaultIceServers = function (turn) {
-    const list = [{ urls: 'stun:stun.cloudflare.com:3478' }];
-    if (turn && turn.url) {
-      list.push({ urls: turn.url, username: turn.username || '',
-                  credential: turn.credential || '' });
-    }
-    return list;
+  /** 默认 ICE：只做 STUN 打洞。TURN 中继兜底已整体移除（打不通会明确提示）。 */
+  Net.defaultIceServers = function () {
+    return [{ urls: 'stun:stun.cloudflare.com:3478' }];
   };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -176,6 +176,37 @@
     return sk.name || null;
   };
 
+  /**
+   * ★「限定技 / 一次性主动技」的统一查询入口。
+   * 角色在自己的 skill.actions 里声明 {name, scenes, usable?, run(game,player,scene)}：
+   * UI 用它点亮右下技能按钮，Game 用它分发行动，AI 用它决定是否发动。
+   * 全部只读玩家当前 skill 视图，因此涅槃后动态获得的技能自动参与。
+   */
+  SGS.findSkillAction = function (player, name, scene) {
+    const sk = player && (player.skill || (player.char && player.char.skill));
+    if (!sk || !name || !sk.actions) return null;
+    const sc = scene || 'play';
+    return sk.actions.find((a) => a && a.name === name &&
+      (a.scenes || ['play']).indexOf(sc) >= 0) || null;
+  };
+
+  /** 这个一次性技能此刻能否发动（每局一次的状态记在 player.usedSkillActions） */
+  SGS.canUseSkillAction = function (player, name, scene) {
+    const action = SGS.findSkillAction(player, name, scene);
+    if (!action) return false;
+    if (player && player.usedSkillActions && player.usedSkillActions[name]) return false;
+    if (typeof action.usable === 'function' &&
+        !action.usable(player, scene || 'play')) return false;
+    return true;
+  };
+
+  /** 当前场景所有可发动的一次性技能 */
+  SGS.availableSkillActions = function (player, scene) {
+    const sk = player && (player.skill || (player.char && player.char.skill));
+    if (!sk || !sk.actions) return [];
+    return sk.actions.filter((a) => a && SGS.canUseSkillAction(player, a.name, scene));
+  };
+
   /** 由 ui.js 注入的日志函数，纯逻辑层可在没有 UI 的环境里安全调用 */
   SGS.log = null;
 })(typeof window !== 'undefined' ? window : globalThis);

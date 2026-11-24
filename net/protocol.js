@@ -170,6 +170,175 @@
     return walk(value);
   };
 
+  /* ---------------- 主机 → 客机：表现层事件（飞牌 / 受击 / 面板） ---------------- */
+  /**
+   * ★ 为什么要单独一套 packFxArgs，而不复用 packArgs：
+   *   packArgs 会把函数「求值成 id 白名单」，但表现层 opts 里的 onArrive
+  *   是「把牌 push 进手牌」的闭包，一旦被遍历求值就会在主机上真的改状态。
+   *   所以这里把所有函数 / DOM 节点 / 布局矩形直接丢掉，只留纯数据。
+   */
+  function isDomLike(v) {
+    return !!(v && (v.nodeType != null || v.nodeName != null ||
+      (v.classList && v.style && typeof v.appendChild === 'function')));
+  }
+  P.packFxArgs = function (args, game, viewerSeat) {
+    function walk(v, depth) {
+      if (v == null || typeof v === 'number' || typeof v === 'boolean' ||
+          typeof v === 'string') return v;
+      if (typeof v === 'function' || isDomLike(v)) return null;
+      if (depth > 8) return null;
+      if (isGame(v)) return { __t: 'game' };
+      if (isPlayer(v)) return { __t: 'p', seat: v.seat };
+      if (isCard(v)) return { __t: 'c', card: plainCard(v) };
+      // 布局矩形（{left,top,width,height}）不该跨端
+      if (v.left != null && v.top != null && v.width != null &&
+          !v.id && !v.type) return null;
+      if (Array.isArray(v)) return v.map((x) => walk(x, depth + 1));
+      const out = {};
+      Object.keys(v).forEach((k) => {
+        if (k === 'onArrive' || k === 'committedItem' || k === 'targetRect' ||
+            k === 'resolve' || k === 'game') return;
+        out[k] = walk(v[k], depth + 1);
+      });
+      return out;
+    }
+    return (args || []).map((a) => walk(a, 0));
+  };
+
+  /** 把一张实体牌换成牌背（对手摸牌 / 暗手牌被牵，绝不外泄牌面） */
+  P.backCard = function (c) {
+    return { id: c && c.id != null ? c.id : ('__back_' + Math.random().toString(36).slice(2, 8)),
+      type: 'back', name: '牌背', suit: '', rank: '', color: 'black',
+      category: 'hidden', image: null, mark: null };
+  };
+  P.hideCardFaces = function (arg) {
+    if (Array.isArray(arg)) return arg.map((c) => P.backCard(c));
+    return P.backCard(arg);
+  };
+
+  /**
+   * ★★ 「谁能看到这张牌的正面」——全局唯一判据（绝对判断）。
+   *
+   *   规则（主公需求）：只有【牌的提供者】和【获得者】能看到正面，
+   *   场上其他任何人都只能看到牌背。
+   *   · 摸牌 / 判定这类「牌来自牌堆」的场合没有提供者，于是只有获得者能看。
+   *   · 例外：这张牌本身就是【全场公开】的（五谷丰登亮出的牌、装备区 /
+   *     判定区的明牌）→ 所有人都看正面。公开牌再藏牌背反而是错的。
+   *
+   *   为什么必须是座位号比对：任何「谁是 human / 谁是 aiPlayer」的判断都
+   *   隐含 1 主机 1 客机，多人局里第三、第四个玩家会被错判成「对手」而
+   *   白看牌面（或反过来自己被当对手，明明自己拿的牌却显示牌背）。
+   *   座位号是全局唯一的，跟视角、人数、谁是房主都无关。
+   *
+   * @param {number|string} viewerSeat   收件人（要看牌的那位）的座位号
+   * @param {number|string} providerSeat 牌的提供者座位号（来自牌堆时传 null）
+   * @param {number|string} receiverSeat 牌的获得者座位号（亮牌 / 弃牌时传 null）
+   * @param {boolean} publicFace         这张牌是否全场公开（默认 false）
+   * @returns {boolean} 该收件人能否看到正面
+   */
+  P.canSeeFxFace = function (viewerSeat, providerSeat, receiverSeat, publicFace) {
+    if (viewerSeat == null || viewerSeat === '') return false;
+    // ★ 公开牌：人人看正面（座位号仍然必须已知，未知就按保守方向处理）
+    if (publicFace) return true;
+    const v = String(viewerSeat);
+    const hit = (s) => s != null && s !== '' && String(s) === v;
+    return hit(receiverSeat) || hit(providerSeat);
+  };
+
+  /**
+   * ★ 从一次表现层调用里提炼「提供者 / 获得者」的座位号。
+   *   主机广播、客机重放、测试都走这一个函数，保证两端口径完全一致。
+   *
+   * @param {string} name  表现层方法名（flyCard / flyCards / animateDraw / 其它）
+   * @param {Array}  args  原始参数数组
+   * @param {object} ctx   { localSeat, remoteSeats:[seat…] } 仅用于兼容旧调用：
+   *                       没显式传 opts.toPlayer 时，按主机屏幕上的落点
+   *                       'hand'(本机获得) / 'ai-hero'(远端获得) 还原获得者。
+   * @returns {{providerSeat:number|null, receiverSeat:number|null, publicFace:boolean}}
+   */
+  P.fxFaceSeats = function (name, args, ctx) {
+    ctx = ctx || {};
+    const a = args || [];
+    const seatOf = (p) => (p && p.seat != null) ? p.seat : null;
+    const out = { providerSeat: null, receiverSeat: null, publicFace: false };
+    // 摸牌：牌从牌堆来 → 没有提供者，只有获得者
+    if (name === 'animateDraw') {
+      out.receiverSeat = seatOf(a[1]);
+      return out;
+    }
+    if (name !== 'flyCard' && name !== 'flyCards') return out;
+    const opts = (a[2] && typeof a[2] === 'object' && !Array.isArray(a[2])) ? a[2] : {};
+    const dest = opts.dest || 'showcase';
+    // ★ 亮牌 / 弃置 / 装备 / 被拆被拆（过河拆桥）这类飞牌没有「获得者」，
+    //   压根不是获得牌，不参与「提供者 / 获得者 / 公开」三态判定，
+    //   正反面照旧由 opts.faceDown 决定（展示区本来就是公开亮牌）。
+    if (dest !== 'hand' && dest !== 'ai-hero') return out;
+    // ★ 全场公开的获得牌（五谷亮出的牌 / 装备区·判定区明牌被牵走）：
+    //   人人看正面。只对「进手牌」的飞牌有意义，所以放在这道门之后。
+    out.publicFace = !!opts.public;
+    out.providerSeat = seatOf(a[1]);
+    if (seatOf(opts.toPlayer) != null) {
+      out.receiverSeat = seatOf(opts.toPlayer);
+      return out;
+    }
+    // 兼容旧调用：调用方没给 toPlayer 时按落点还原（1v1 语境下的历史行为）
+    if (dest === 'hand') out.receiverSeat = ctx.localSeat != null ? ctx.localSeat : null;
+    else {
+      const rs = ctx.remoteSeats || (ctx.remoteSeat != null ? [ctx.remoteSeat] : []);
+      out.receiverSeat = rs.length === 1 ? rs[0] : null;
+    }
+    return out;
+  };
+
+  /**
+   * ★ 视角翻转：主机算的 dest 是「主机屏幕上的落点」——
+   *   'hand' = 主机自己收牌（客机是对手，只能看牌背飞向对手框），
+   *   'ai-hero' = 远端（客机）收牌（客机屏幕上是我方手牌，应正面显示真牌面）。
+   *
+   * hide 由主机按「客机有没有权看这张牌」算好随帧下发：
+   *   hide=true  → 牌面根本没下发（只有牌背占位），客机统一显示牌背、落点
+   *                固定为对手框，绝不翻转成自己的手牌区。
+   *   hide=false → 客机自己收牌 / 公开亮牌，按镜像翻转，正面朝上。
+   * 两种情况都清掉 onArrive：客机状态只由权威快照决定。
+   *
+   * ★★ 这里曾有一个隐藏很深的烈性 bug：旧版对 args 做「全量递归」，
+   *   animateDraw 的第 3 个参数是 Game（unpack 后就是 viewGame），而
+   *   viewGame.ui === 真实 UI、UI.game === viewGame 构成环 —— 递归直接
+   *   栈溢出，异常被 transport 的 try/catch 静默吞掉，表现就是「客机
+   *   完全没有摸牌动画（自己的和对方的都没有）」，而飞牌类帧的 args[2]
+   *   是普通 opts 不受影响，所以只有摸牌中招。
+   *   现在只识别并翻转「opts 形状」的对象，Game / Player / 纯数据一律不深入。
+   */
+  P.unpackFxArgs = function (packed, viewGame, mySeat, hide) {
+    const args = P.unpackArgs(packed, viewGame);
+    const seen = new WeakSet();
+    function isOptsLike(o) {
+      return !!o && typeof o === 'object' && !Array.isArray(o) &&
+        !isGame(o) && !isPlayer(o) && !isDomLike(o) &&
+        ('dest' in o || 'faceDown' in o || 'onArrive' in o || 'toPlayer' in o);
+    }
+    function flip(v) {
+      if (!v || typeof v !== 'object') return v;
+      if (seen.has(v)) return v;
+      seen.add(v);
+      if (Array.isArray(v)) { v.forEach(flip); return v; }
+      if (!isOptsLike(v)) return v;      // Game / Player / UI / 纯数据：绝不深入
+      if (v.dest === 'hand' || v.dest === 'ai-hero') {
+        if (hide) {
+          v.dest = 'ai-hero';
+          v.faceDown = true;
+          v.onArrive = null;
+        } else {
+          v.dest = v.dest === 'hand' ? 'ai-hero' : 'hand';
+          if (v.dest === 'hand') { v.faceDown = false; v.onArrive = null; }
+        }
+      }
+      return v;
+    }
+    args.forEach(flip);
+    return args;
+  };
+
   /* ---------------- 主机 → 客机：按座位裁剪的权威快照 ---------------- */
   /**
    * 只发「客机应该看见的」：自己的手牌全量，对手手牌仅张数。
@@ -186,6 +355,9 @@
       shaUsed: p.shaUsed || 0, jiuUsed: !!p.jiuUsed,
       jianyingUsed: !!p.jianyingUsed,
       trickUsedThisTurn: !!p.trickUsedThisTurn,
+      // ★ 涅槃等局中获得的技能 / 已用掉的一次性技能：客机按钮与技能栏要同步
+      skills: (p.acquiredSkills || []).slice(),
+      usedSkillActions: Object.assign({}, p.usedSkillActions || {}),
       playLogCount: (p.playLog || []).length,
       equips: equipData(p),
       delayed: (p.delayed || []).map(plainCard),
@@ -262,6 +434,13 @@
       p.shaUsed = d.shaUsed || 0; p.jiuUsed = !!d.jiuUsed;
       p.jianyingUsed = !!d.jianyingUsed;
       p.trickUsedThisTurn = !!d.trickUsedThisTurn;
+      // 重建本玩家的技能视图：char.skill 不共享，避免污染另一个座位
+      p.acquiredSkills = [];
+      p._skillView = null;
+      p.usedSkillActions = Object.assign({}, d.usedSkillActions || {});
+      (d.skills || []).forEach((n) => {
+        if (typeof p.acquireSkill === 'function') p.acquireSkill(n);
+      });
       p.playLog = new Array(d.playLogCount || 0).fill(null)
         .map((_, i) => viewGame._fakePlayLog ? viewGame._fakePlayLog[i] : { card: null });
       p.equips = {};

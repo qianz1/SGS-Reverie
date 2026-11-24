@@ -236,7 +236,11 @@
         //   AI 默认连对手，多人局会把自己也连上以放大属性伤害传导。
         const t = SGS.Cards.targetOf(card.type);
         const min = t.minTargets || 1;
-        const max = t.maxTargets || 2;
+        // ★【连环】：使用【铁索连环】可多指定一名角色（2 → 3）；
+        //   hook 默认 0，普通角色行为完全不变。
+        const bonus = (user && typeof user.hook === 'function')
+          ? (user.hook('chainTargetBonus') || 0) : 0;
+        const max = (t.maxTargets || 2) + bonus;
         let picks = null;
         if (SGS.isDecider(user)) {
           if (this.ui && typeof this.ui.waitChainTargets === 'function') {
@@ -248,6 +252,14 @@
         }
         if (!picks || picks.length < min) return [];
         picks = picks.slice(0, max);
+        // ★【连环】：真·铁索连环（非♣转化）多连一人时补一条发动记录，
+        //   UI.log 会统一兜底播技能大字 + SHU-PangTong_LianHuan.webm
+        if (bonus > 0 && picks.length > (t.maxTargets || 2) &&
+            !card.viaSkill && SGS.log) {
+          const skName = (user.skill && user.skill.chainTargetSkill) || '连环';
+          SGS.log(user.name + ' 发动【' + skName +
+            '】，使用【铁索连环】额外指定一名角色为目标。', 'sys');
+        }
         // 向每名目标（除自己）拉一条黄线，表示铁索连到这些人
         if (this.ui && typeof this.ui.showTargetLines === 'function') {
           this.ui.showTargetLines(user, picks);
@@ -344,11 +356,22 @@
       // ★ 若这张实体牌此刻装备在身上（技能把装备区的「牌」当素材使用/打出），
       //   飞牌起点自动改成对应装备槽，而不是错误地从手牌区出发。
       //   只在调用方没有显式指定 from 时补，过河拆桥 / 替换旧装备等不受影响。
-      if (!opts.from && fromPlayer && SGS.Zones && SGS.Zones.find) {
-        const ze = SGS.Zones.find(fromPlayer, card.id);
-        if (ze && ze.zone === 'equip') {
-          opts = Object.assign({}, opts, { from: 'equip', slot: ze.zoneKey });
-        }
+      const zoneEntry = (fromPlayer && SGS.Zones && SGS.Zones.find)
+        ? SGS.Zones.find(fromPlayer, card.id) : null;
+      if (!opts.from && zoneEntry && zoneEntry.zone === 'equip') {
+        opts = Object.assign({}, opts, {
+          from: 'equip', slot: zoneEntry.zoneKey
+        });
+      }
+      // ★ 全场公开的【获得牌】：装备区 / 判定区的牌本来就是明牌，谁都看得见，
+      //   被牵走时飞牌一律正面 —— 藏成牌背反而是错的。
+      //   唯一的来源是区域层的 faceUp（手牌 false、装备区/判定区 true）；
+      //   调用方显式给了 public 就尊重调用方（五谷丰登亮出的牌走这条）。
+      //   ★ 只对「进手牌」的飞牌生效：过河拆桥这类是【弃置】（dest 默认
+      //     showcase，进弃牌堆），没有获得者，压根不是获得牌，不该带 public。
+      const toHandFx = opts.dest === 'hand' || opts.dest === 'ai-hero';
+      if (toHandFx && opts.public === undefined && zoneEntry && zoneEntry.faceUp) {
+        opts = Object.assign({}, opts, { public: true });
       }
       if (this.ui && typeof this.ui.flyCard === 'function') {
         await this.ui.flyCard(card, fromPlayer, opts);
@@ -487,7 +510,7 @@
         if (this.mode && this.players.length) {
           const seats = this.players.map((p) =>
             SGS.seatLabel(p.seat) + '号位 ' + p.name +
-            (p.isHuman ? '（你）' : '（AI）')).join('，');
+            (p.isHuman ? '（你）' : (p.isRemote ? '（对手）' : '（AI）'))).join('，');
           SGS.log('本局座次：' + seats + '；' + this.actor.name + ' 先手。', 'turn');
         }
         SGS.log(
@@ -759,6 +782,10 @@
       // ① 丈八蛇矛：两张手牌当【杀】使用（由装备区武器栏点击触发，
       //    不是技能按钮，因此单独走一条分支，不要求 act.card）
       if (act.zhangba) return await this.useZhangbaSha(p, act.cards);
+      // ★ 一次性主动技（【涅槃】）：右下技能按钮回传 {type:'skillAction', name, scene}
+      if (act.type === 'skillAction') {
+        return await this.useSkillAction(p, act.name, act.scene || 'play');
+      }
       if (!act.card) return false;
       const card = act.card;
       // ★「牌」= 手牌 + 装备区（不含判定区）：转化技能的素材可以来自装备栏。
@@ -768,12 +795,26 @@
       if (!inZones) return false;
 
       // ★【铁索连环】重铸：弃置此牌摸一张，不进入锦囊使用流程。
+      //   【连环】允许把 ♣ 牌当【铁索连环】重铸，走与转化使用同一套校验。
       if (act.type === 'reforge') {
-        if (card.type !== 'tiesuolianhuan') {
+        if (act.viaSkill) {
+          const cv = act.conversion;
+          if (!cv || cv.to !== 'tiesuolianhuan' || !cv.reforge ||
+              (cv.scenes || ['play']).indexOf(act.scene || 'play') < 0 ||
+              !SGS.Cards.matchesFrom(card, cv.from) ||
+              !p.canUseAsType(card, cv.to)) {
+            if (SGS.log) SGS.log('这张牌不能重铸。', 'warn');
+            return false;
+          }
+        } else if (card.type !== 'tiesuolianhuan') {
           if (SGS.log) SGS.log('这张牌不能重铸。', 'warn');
           return false;
         }
-        return await this.reforge(p, card);
+        return await this.reforge(p, card, {
+          // ★【连环】：♣ 牌当铁索连环重铸也要有触发记录 / 技能语音
+          skillName: act.viaSkill
+            ? ((act.conversion && act.conversion.skill) || '连环') : null
+        });
       }
 
       // ① 通过技能按钮发动的转化牌
@@ -830,12 +871,18 @@
         //   都用原来的实体牌，避免弃牌堆里混进假牌。
         if (conv.to === 'huogong' || SGS.Cards.isTrick(conv.to)) {
           const asCard = Object.assign({}, card, {
-            type: conv.to, name: SGS.Cards.nameOf(conv.to)
+            type: conv.to, name: SGS.Cards.nameOf(conv.to),
+            // 标记「当作牌」：selectTargets 不再重复写【连环】的额外目标日志
+            viaSkill: true
           });
           this.playCardVoice(p, card, conv.to);
           return await SGS.Tricks.use(this, p, asCard, {
             realCard: card, asName: SGS.Cards.nameOf(conv.to),
-            asType: conv.to, skillName: SGS.skillNameFor(p, 'play')
+            asType: conv.to,
+            // ★ 铁索连环固定取转化项自己的技能名，避免获得【火计】后
+            //   buttonName('play') 变成火计，把 ♣ 转化误记成发动火计
+            skillName: conv.to === 'tiesuolianhuan'
+              ? (conv.skill || '连环') : SGS.skillNameFor(p, 'play')
           });
         }
         if (SGS.log) SGS.log('这张牌不能在此阶段发动该转化。', 'warn');
@@ -1013,8 +1060,14 @@
      * ★【铁索连环】重铸：出牌阶段弃置此牌并摸一张牌。
      * 明确「不视为使用」：不进 Tricks.use()、不改任何使用计数；
      * 弃牌照常走 presentCard 动画，展示区标「重铸」。
+     * opts.skillName（【连环】♣ 转化重铸）= 写发动记录，UI 据此播语音。
      */
-    async reforge(p, card) {
+    async reforge(p, card, opts) {
+      opts = opts || {};
+      if (opts.skillName && SGS.log) {
+        SGS.log(p.name + ' 发动【' + opts.skillName + '】，将【' +
+          card.name + '】当【铁索连环】重铸。', 'sys');
+      }
       await this.presentCard(card, p, { dest: 'showcase', note: '重铸' });
       await this.discardConsumed(p, card);
       if (SGS.log) {
@@ -1025,6 +1078,58 @@
       if (SGS.log) SGS.log(p.name + ' 重铸摸了 ' + got.length + ' 张牌。', 'sys');
       this.ui.render(this);
       return true;
+    }
+
+    /**
+     * ★ 一次性主动技（【涅槃】等）的统一入口。
+     * 规则层只认角色文件在 skill.actions 里声明的名字与场景；
+     * 「每局一次」的状态记在 player.usedSkillActions，不随回合重置。
+     */
+    async useSkillAction(player, name, scene) {
+      if (!SGS.canUseSkillAction(player, name, scene)) return false;
+      const action = SGS.findSkillAction(player, name, scene);
+      if (!action) return false;
+      if (!player.usedSkillActions) player.usedSkillActions = {};
+      player.usedSkillActions[name] = true;
+      // 和日志兜底同一入口，skillFX 自带短时去重，不会播两遍
+      this.announceSkill(player, name);
+      const ok = await action.run(this, player, scene || 'play');
+      this.ui.render(this);
+      return ok !== false;
+    }
+
+    /**
+     * ★ 弃置一个角色「区域里的所有牌」：手牌区 + 装备区四槽 + 判定区。
+     * 飞牌逐张走 presentCard（自动识别装备槽起点），离场统一走 Zones.take
+     * 并进弃牌堆；装备失去照常结算【白银狮子】回血。
+     * @returns {Array} 被弃置的 SGS.Zones 条目
+     */
+    async discardAllZoneCards(player, opts) {
+      if (!player) return [];
+      opts = opts || {};
+      const entries = (SGS.Zones && typeof SGS.Zones.list === 'function')
+        ? SGS.Zones.list(player) : [];
+      if (!entries.length) return [];
+      for (const e of entries) {
+        await this.presentCard(e.card, player, {
+          dest: 'showcase', note: opts.note || '弃置'
+        });
+      }
+      for (const e of entries) {
+        const removed = (SGS.Zones && typeof SGS.Zones.take === 'function')
+          ? SGS.Zones.take(player, e.id) : null;
+        // Zones.take() 返回的是区域条目 {card, zone...}，弃牌堆要收真牌
+        const card = removed && removed.card ? removed.card : removed;
+        if (!card) continue;
+        if (this.deck && typeof this.deck.discard === 'function') {
+          this.deck.discard(card);
+        }
+        if (e.zone === 'equip' && typeof this.onEquipmentLost === 'function') {
+          await this.onEquipmentLost(player, card);
+        }
+      }
+      this.ui.render(this);
+      return entries;
     }
 
     /**
@@ -2385,7 +2490,10 @@
             typeof target.canUseAsType === 'function' &&
             target.canUseAsType(c, 'tao')
         );
-        if (!saves.length && !canConvert) break;
+        // ★【涅槃】：即便手里一张桃/酒都没有，只要限定技还没用过，
+        //   仍要在濒死界面给一次发动机会（右下技能按钮 / AI 决策）。
+        const canAct = SGS.availableSkillActions(target, 'brink').length > 0;
+        if (!saves.length && !canConvert && !canAct) break;
 
         let used = null;
         if (SGS.isDecider(target)) {
@@ -2394,6 +2502,11 @@
           used = await this.ai.brink(target);
         }
         if (!used) break; // 放弃 / 脏数据
+        // 一次性主动技：发动后体力通常已回到 3，循环条件自然结束。
+        if (used.type === 'skillAction') {
+          await this.useSkillAction(target, used.name, used.scene || 'brink');
+          continue;
+        }
 
         let card = used;
         let asName = null;

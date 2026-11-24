@@ -42,6 +42,16 @@
     async playPhase(player) {
       const g = this.game;
 
+      // 0) 一次性主动技（【涅槃】）：角色文件自己决定时机，规则层走统一入口
+      for (const action of SGS.availableSkillActions(player, 'play')) {
+        const name = typeof action.aiChoice === 'function'
+          ? action.aiChoice(g, player, 'play') : action.name;
+        if (name !== action.name) continue;
+        await g.useSkillAction(player, name, 'play');
+        if (g.over) return;
+        break;   // 一回合只考虑一次，避免新获得的技能把循环带飞
+      }
+
       // 1) 受伤就吃桃（满血不吃）；★【龙魂】没有真【桃】时可用 ♥ 当【桃】
       let guard = 0;
       while (player.hp < player.maxHp && guard++ < 10) {
@@ -83,6 +93,24 @@
         if (!ok) break;
         await SGS.sleep(350);
         if (g.over) return;
+      }
+
+      // 3.5)【连环】：♣ 牌（含装备区）当【铁索连环】使用，走真锦囊同一个入口
+      if ((player.skill.conversions || []).some((c) => c.to === 'tiesuolianhuan')) {
+        const conv = this.pickConverted(player, 'play', 'tiesuolianhuan');
+        if (conv) {
+          const asCard = Object.assign({}, conv.card, {
+            type: 'tiesuolianhuan', name: '铁索连环', viaSkill: true
+          });
+          if (SGS.Tricks.canUse(g, player, asCard).ok) {
+            await SGS.Tricks.use(g, player, asCard, {
+              realCard: conv.card, asName: '铁索连环', asType: 'tiesuolianhuan',
+              skillName: '连环'
+            });
+            await SGS.sleep(350);
+            if (g.over) return;
+          }
+        }
       }
 
       // 4) 出杀前喝【酒】：本回合限一次，为下一张【杀】伤害 +1。
@@ -440,10 +468,21 @@
       const real = player.findByType('tao')[0] || player.findByType('jiu')[0];
       if (real) return real;
       const converted = this.pickConverted(player, 'brink', 'tao');
-      return converted ? {
-        card: converted.card, viaSkill: true,
-        conversion: converted.conversion, scene: 'brink'
-      } : null;
+      if (converted) {
+        return {
+          card: converted.card, viaSkill: true,
+          conversion: converted.conversion, scene: 'brink'
+        };
+      }
+      // ★ 没桃没酒时考虑【涅槃】这类濒死一次性主动技
+      for (const action of SGS.availableSkillActions(player, 'brink')) {
+        const name = typeof action.aiChoice === 'function'
+          ? action.aiChoice(this.game, player, 'brink') : action.name;
+        if (name === action.name) {
+          return { type: 'skillAction', name: name, scene: 'brink' };
+        }
+      }
+      return null;
     }
   }
 
