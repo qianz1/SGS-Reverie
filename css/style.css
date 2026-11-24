@@ -571,7 +571,8 @@ body input, body textarea, body [contenteditable="true"] {
   text-shadow: 0 1px 2px #000, 0 0 5px rgba(0,0,0,.9);
 }
 /* ================= 角色信息浮层 =================
-   鼠标悬停或点击角色框时显示；hover 由 CSS，点击由 .info-open class。
+   两种弹出方式：鼠标悬停（CSS :hover）或长按角色框（JS 挂 .info-open）。
+   长按松手后加 .info-hold-suppressed，压掉仍在框上的 hover，直到指针离开。
    pointer-events:none 保证浮层不遮挡「点角色框选目标」等原有交互。 */
 .hero-info {
   position: absolute;
@@ -605,6 +606,10 @@ body input, body textarea, body [contenteditable="true"] {
 .hero-card.foe.info-open .hero-info { transform: translate(-50%, 0); }
 .hero-card.self:hover .hero-info,
 .hero-card.self.info-open .hero-info { transform: translateY(0); }
+/* 长按松手：即便指针还停在框上，也先压掉 hover 直到 pointerleave */
+.hero-card.info-hold-suppressed:hover .hero-info {
+  opacity: 0; visibility: hidden;
+}
 .hi-head { color: var(--gold); font-size: 1.18em; font-weight: 800; letter-spacing: 1px; }
 .hi-title { color: var(--muted); font-weight: 400; font-size: .82em; margin-left: 6px; }
 .hi-meta {
@@ -804,6 +809,11 @@ body input, body textarea, body [contenteditable="true"] {
 /* ★「插入手牌」动画：旧牌 FLIP 平滑让位（transform 由 ui.js 内联驱动），
    新牌真 DOM 在飞牌落地前用 visibility:hidden 隐藏，避免与飞牌重影。 */
 .card.flip-move { will-change: transform; }
+/* ★ 正在「飞入」手牌的那几张：用类而不是内联 visibility —— 飞牌期间
+   任何一次 render（快照 / ask / 结算收尾）重建出来的新节点都会带上
+   这个类，落点位置不会提前冒出一张真牌。落点后由 ui.js 按 id 去掉。
+   这一步是「伤逝摸牌看起来和普通摸牌不一样」的根治点。 */
+.card.fx-arriving { visibility: hidden; }
 
 /* 牌背：back.webp 加载失败时回退到 CSS 绘制（与目标牌区面板同款金色牌背） */
 .card-back {
@@ -2354,6 +2364,9 @@ body.allow-portrait .rotate-hint { display: none !important; }
 .pick-hero.info-open .hero-info {
   opacity: 1; visibility: visible;
   transform: translate(-50%, 0);
+}
+.pick-hero.info-hold-suppressed:hover .hero-info {
+  opacity: 0; visibility: hidden;
 }
 
 /* —— 矮横屏：收紧标题与框，保证浮层仍在视口内 —— */

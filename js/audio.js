@@ -112,7 +112,10 @@
     '八阵': 'BaZhen',
     '藏拙': 'CangZhuo',
     '连环': 'LianHuan',
-    '涅槃': 'NiePan'
+    '涅槃': 'NiePan',
+    '绝情': 'JueQing',
+    '伤逝': 'ShangShi',
+    '翦灭': 'JianMie'
   };
 
   let bgm = null;

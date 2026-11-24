@@ -37,7 +37,7 @@
     onPlayCard(game, player, current, previous) {
       return undefined;
     },
-    /** 每次受到伤害后触发，count = 本回合第几次（【矢北】第一/第二次） */
+    /** 每次受到伤害后触发，count = 本回合第几次（【矢北】第一次回血、此后每次失血） */
     onDamaged(game, player, count, info) {
       return undefined;
     },
@@ -48,6 +48,18 @@
     /** 【铁索连环】可额外指定的目标数（【连环】+1 → 最多 3 名） */
     chainTargetBonus(player) {
       return 0;
+    },
+    /** 即将造成的伤害是否改为「失去体力」（【绝情】：锁定技） */
+    damageAsLoss(player, target, amount, dmgType, opts) {
+      return false;
+    },
+    /** 失去体力后触发（通用钩子；【伤逝】改走 onHandBelowX） */
+    onHpLost(player, game, amount, info) {
+      return undefined;
+    },
+    /** 手牌数小于 X 后触发（【伤逝】：X = 已损失体力值，摸至 X 张） */
+    onHandBelowX(player, game) {
+      return undefined;
     }
   };
 
@@ -105,7 +117,8 @@
       this.trickUsedThisTurn = false; // 本回合是否使用过锦囊牌（【藏拙】）
       this.jianyingUsed = false;     // 【渐营】出牌阶段限一次转化
       this.turnDamageCount = 0;      // 【矢北】本回合受到伤害的次数（所有角色每回合重置）
-      this.shibeiHealed = false;     // 【矢北】本回合第一次伤害是否已回血
+      this.shibeiHealed = false;     // 【矢北】旧版状态字段，现规则不需要，保留兼容
+      this.jianmieUsed = false;      // 【翦灭】出牌阶段限一次
       // ★ 涅槃这类「局中获得」的技能：只改本玩家专属视图，不动 char.skill
       this.acquiredSkills = [];      // 已获得的派生技能名（联机快照也用它同步）
       this.usedSkillActions = {};    // 限定技等一次性技能：{ 技能名: true }
@@ -222,7 +235,13 @@
       const i = this.hand.findIndex((c) => c.id === cardId);
       if (i >= 0) {
         this._lastRemoved = { zone: 'hand', zoneKey: 'hand' };
-        return this.hand.splice(i, 1)[0];
+        const removed = this.hand.splice(i, 1)[0];
+        // ★【伤逝】：触发条件是「手牌数小于 X 后」，与是否失去体力无关。
+        //   任何手牌离手（使用 / 弃置 / 被拆 / 装备离手…）都可能让手牌数
+        //   跌破 X，统一在这里通知所属 Game 复查。Player 不依赖 Game，
+        //   通过一个由 Game 注入的轻量回调桥接（同 SGS.log 的做法）。
+        if (typeof SGS.onHandRemoved === 'function') SGS.onHandRemoved(this, removed);
+        return removed;
       }
       if (SGS.Equipment && typeof SGS.Equipment.unmount === 'function') {
         const c = SGS.Equipment.unmount(this, cardId);
@@ -268,6 +287,7 @@
       this.jianyingUsed = false;
       this.turnDamageCount = 0;
       this.shibeiHealed = false;
+      this.jianmieUsed = false;
     }
   }
 

@@ -289,6 +289,11 @@
       // ★ 正在「离手飞行」的牌 id → 起飞时间戳。手牌渲染时把它们当作已经
       //   不在手里，直到权威手牌数据里真的没有它们（见 visibleHand）。
       this._departing = {};
+      // ★ 正在「飞入手牌」的牌 id → 起飞时间戳（与 _departing 对称）。
+      //   飞牌期间任何一次 render 重建出来的真牌节点都要保持隐藏（.fx-arriving），
+      //   落地后按 id 去掉。没有这层，伤逝这类「在别人流程中间摸牌」就会在
+      //   落点位置提前渲染出一张真牌（飞牌与真牌重影）。
+      this._arriving = {};
     }
 
     init() {
@@ -313,30 +318,26 @@
       }
 
       // 目标选择：点击高亮的角色卡确定目标（多人局按 data-player 扩展）
-      // ★ 仅在非选目标状态时，点击才切换「角色信息」浮层（hover 由 CSS 负责）。
-      //   选目标期间点击只选目标：不弹出介绍，也不留下 info-open 状态，
-      //   顺手把之前已打开的两张浮层收起，避免遮挡目标高亮。
+      // ★ 角色介绍改为「长按期间弹出、松手关闭」；hover 弹出仍由 CSS 负责。
+      //   click 只负责选目标，不再切换 info-open；选目标期间长按也不弹介绍。
       ['ai-area', 'me-area'].forEach((id) => {
         const el = $(id);
-        if (el && el.addEventListener) {
-          el.addEventListener('click', () => {
+        if (!el || !el.addEventListener) return;
+        el.addEventListener('click', () => {
+          this.onHeroClick(el.dataset.player);
+          // 兜底：清掉异常残留的浮层（正常路径松手时已经关掉）
+          const other = $(id === 'ai-area' ? 'me-area' : 'ai-area');
+          if (other && other.classList) other.classList.remove('info-open');
+          if (el.classList) el.classList.remove('info-open');
+        });
+        this.bindHoldInfo(el, {
+          group: () => [$('ai-area'), $('me-area')],
+          guard: () => {
             const mode = this.pending && this.pending.mode;
-            const selecting = mode === 'target' || mode === 'targets' ||
+            return mode === 'target' || mode === 'targets' ||
               mode === 'chainTargets';
-            this.onHeroClick(el.dataset.player);
-            const other = $(id === 'ai-area' ? 'me-area' : 'ai-area');
-            if (other && other.classList) other.classList.remove('info-open');
-            clearTimeout(el._infoTimer);
-            if (selecting) {
-              el.classList.remove('info-open');
-              return;
-            }
-            el.classList.toggle('info-open');
-            el._infoTimer = setTimeout(() => {
-              if (el.classList) el.classList.remove('info-open');
-            }, 4000);
-          });
-        }
+          }
+        });
       });
 
       // 装备区：点玩家自己的「武器」栏发动【丈八蛇矛】主动转化
@@ -395,6 +396,58 @@
       // 战斗 BGM：这里只建立实例 / preload，真正 play() 由选将后的用户手势启动
       try { if (SGS.Audio && SGS.Audio.init) SGS.Audio.init(); }
       catch (e) { /* 音频不可用不影响界面 */ }
+    }
+
+    /**
+     * 角色介绍：「长按期间弹出，松手关闭」。
+     * hover 的显隐仍交给 CSS；这里只管按住期间挂上的 .info-open。
+     * 同一时刻同组里只有一个框保持弹出（group 回调给出同组元素）。
+     */
+    bindHoldInfo(el, opts) {
+      if (!el || typeof el.addEventListener !== 'function') return;
+      opts = opts || {};
+      const HOLD_MS = 280;
+      let timer = null;
+      let holding = false;
+
+      const close = (leave) => {
+        holding = false;
+        if (timer) { clearTimeout(timer); timer = null; }
+        if (!el.classList) return;
+        const wasOpen = el.classList.contains('info-open');
+        el.classList.remove('info-open');
+        if (wasOpen && !leave) {
+          // 松手后压掉 hover，直到指针离开框为止，确保「松手即关」可见
+          el.classList.add('info-hold-suppressed');
+        }
+        if (leave) el.classList.remove('info-hold-suppressed');
+      };
+
+      const start = (e) => {
+        if (e && typeof e.button === 'number' && e.button !== 0) return;
+        if (typeof opts.guard === 'function' && opts.guard()) return;
+        close();  // 先收起上一次，并清掉 hover 抑制
+        if (el.classList) el.classList.remove('info-hold-suppressed');
+        holding = true;
+        timer = setTimeout(() => {
+          timer = null;
+          if (!holding) return;
+          if (typeof opts.group === 'function') {
+            (opts.group() || []).forEach((other) => {
+              if (other && other !== el && other.classList) {
+                other.classList.remove('info-open');
+              }
+            });
+          }
+          if (el.classList) el.classList.add('info-open');
+        }, HOLD_MS);
+      };
+
+      el.addEventListener('pointerdown', start);
+      el.addEventListener('pointerup', () => close(false));
+      el.addEventListener('pointercancel', () => close(false));
+      el.addEventListener('pointerleave', () => close(true));
+      el.addEventListener('touchend', () => close(false));
     }
 
     /**
@@ -930,15 +983,11 @@
 
       const heroes = (typeof box.querySelectorAll === 'function')
         ? box.querySelectorAll('.pick-hero') : [];
+      // ★ 选将卡介绍同样改为「长按弹出、松手关闭」（hover 由 CSS 负责），
+      //   不再用点击切换；点「选择此将」按钮开局的路径不受影响。
       Array.prototype.forEach.call(heroes, (hero) => {
         if (!hero || typeof hero.addEventListener !== 'function') return;
-        hero.addEventListener('click', () => {
-          const wasOpen = hero.classList && hero.classList.contains('info-open');
-          Array.prototype.forEach.call(heroes, (h) => {
-            if (h && h.classList) h.classList.remove('info-open');
-          });
-          if (!wasOpen && hero.classList) hero.classList.add('info-open');
-        });
+        this.bindHoldInfo(hero, { group: () => heroes });
       });
       const btns = (typeof box.querySelectorAll === 'function')
         ? box.querySelectorAll('.pick-btn') : [];
@@ -1193,9 +1242,7 @@
           el.style.transition = 'transform .42s cubic-bezier(.22,.61,.36,1)';
           el.style.transform = 'translate(0,0)';
         });
-        if (typeof requestAnimationFrame === 'function') {
-          requestAnimationFrame(() => requestAnimationFrame(play));
-        } else play();
+        this.waitTwoFrames(play);
         this._predictMovers = (this._predictMovers || []).concat(movers);
       }
       return true;
@@ -1222,6 +1269,64 @@
       const keys = Object.keys(map);
       if (!keys.length) return arr;
       return arr.filter((c) => !(c && c.id != null && map[String(c.id)]));
+    }
+
+    /**
+     * ★ 等两帧后再执行 fn（先让起点样式落地，再触发 transition）。
+     *
+     * 为什么要带定时器兜底：只等 requestAnimationFrame 时，**后台标签页 /
+     * 无头浏览器 / 某些被节流的场景**里 rAF 可能长时间甚至永远不回调 ——
+     * 那样 start() 不会执行：飞牌永远停在起点、真牌永远藏着，而这个 await
+     * 也不会 resolve，整个摸牌流程（drawCards → 结算）就此卡死。
+     * 兜底定时器保证「无论如何都会起飞」，与 rAF 谁先到就由谁触发一次。
+     */
+    waitTwoFrames(fn) {
+      return new Promise((resolve) => {
+        let done = false;
+        const fire = () => {
+          if (done) return;
+          done = true;
+          try { if (typeof fn === 'function') fn(); } finally { resolve(); }
+        };
+        if (typeof requestAnimationFrame === 'function') {
+          requestAnimationFrame(() => requestAnimationFrame(fire));
+        }
+        if (typeof setTimeout === 'function') setTimeout(fire, 120);
+        else if (typeof requestAnimationFrame !== 'function') fire();
+      });
+    }
+
+    /**
+     * ★ 把「正在飞入手牌」的牌按 id 重新打上 .fx-arriving（隐藏）。
+     *
+     * 为什么必须有这一层：
+     *   flipInsertIntoHand 会把新牌的真节点隐藏，等克隆飞牌落地再露出。但
+     *   【伤逝】这类「手牌离手后立刻补牌」的触发点在别人流程的中间（出牌 /
+     *   翦灭弃牌 / 被拆），调用方随后还会再 render 一次 —— 那一次重建会把
+     *   真牌节点换成新的（没有隐藏），于是飞牌期间落点位置就冒出一张真牌，
+     *   而且落地清理恢复的是「旧节点」，新节点永远不恢复，重影就留在那里。
+     *   改成类名 + 按 id 同步：任何一次重建都自动继承隐藏状态。
+     *
+     * 兜底：超过 2.2s 仍未落地（异常 / 动画被打断）就自动解除，避免真牌
+     * 永久隐身 —— 宁可多一次短暂重影，也不能让玩家的牌看不见。
+     */
+    syncArrivingMask() {
+      const map = this._arriving || {};
+      const now = Date.now();
+      Object.keys(map).forEach((k) => { if (now - map[k] > 2200) delete map[k]; });
+      const handEl = $('me-hand');
+      if (!handEl || typeof document.querySelectorAll !== 'function') return;
+      let nodes = [];
+      try {
+        nodes = Array.prototype.slice.call(
+          document.querySelectorAll('#me-hand .card'));
+      } catch (e) { return; }
+      nodes.forEach((el) => {
+        if (!el || !el.classList) return;
+        const id = el.dataset && el.dataset.id != null ? String(el.dataset.id) : '';
+        if (id && map[id]) el.classList.add('fx-arriving');
+        else el.classList.remove('fx-arriving');
+      });
     }
 
     /** 手牌真正重排后清掉预测残留的 inline 样式 */
@@ -1334,9 +1439,9 @@
           el.style.transform = 'translate(0,0)';
         });
       };
-      if (typeof requestAnimationFrame === 'function') {
-        requestAnimationFrame(() => requestAnimationFrame(play));
-      } else { play(); }
+      // 双帧让浏览器先应用起点样式，再触发 transition；
+      // 用 waitTwoFrames（带定时器兜底）—— 只等 rAF 在后台标签页里会永久错位。
+      this.waitTwoFrames(play);
       const cleanup = () => {
         if (gen !== this._handFlipGen) return;   // 已有更新的 FLIP 在跑
         movers.forEach((el) => {
@@ -1662,6 +1767,7 @@
       const changed = this.syncHandDOM(me.hand, null);
       this.clearPredictMovers();
       if (!changed) return;
+      this.syncArrivingMask();
       this.layoutHand(this.visibleHand(me.hand).length);
       if (before) this.playHandFlip(before);
     }
@@ -1770,6 +1876,7 @@
       const respondMode = !!pd && pd.mode === 'respond';
       const pickMode = !!pd && pd.mode === 'pick';
       const brinkMode = !!pd && pd.mode === 'brink';
+      const discardMode = !!pd && pd.mode === 'discard';
       const respondNeed = (pd && pd.respondNeed) || 'shan';
       // ★ 自动 FLIP：重建前记录旧手牌位置，重建后让留下来的牌平滑合拢。
       //   flipInsertIntoHand 会临时置 suppress（它自己已做让位，避免叠加）。
@@ -1781,7 +1888,9 @@
           (skillMode && !findConversion(pd.player, c, pd.scene, pd.respondNeed, pd.skillName)) ||
           (respondMode && !SGS.Cards.matchesRespond(c, respondNeed)) ||
           (pickMode && pd.pickFilter && !pd.pickFilter(c)) ||
-          (brinkMode && !(pd.saves || []).some((s) => s.id === c.id))
+          (brinkMode && !(pd.saves || []).some((s) => s.id === c.id)) ||
+          // ★ 弃牌阶段：不计入上限的牌（藏拙的锦囊）置灰，弃它不会减少有效张数
+          (discardMode && typeof pd.skip === 'function' && pd.skip(c))
       });
       // ★ 客机视图模式：ask 触发的 render() 也走 keyed diff，绝不重建手牌 DOM。
       //   否则无懈询问到来时，正在飞的真牌会「重新冒出来」，表现为小拉回。
@@ -1791,11 +1900,13 @@
       if (this._netView && typeof this.syncHandDOM === 'function' &&
           typeof document.querySelectorAll === 'function') {
         if (this.syncHandDOM(me.hand, handOpts)) {
+          this.syncArrivingMask();
           this.layoutHand(viewHand.length);
           if (handFlipBefore) this.playHandFlip(handFlipBefore);
         }
       } else {
         $('me-hand').innerHTML = viewHand.map((c) => this.cardHTML(c, handOpts(c))).join('');
+        this.syncArrivingMask();
         this.layoutHand(viewHand.length);
         if (handFlipBefore) this.playHandFlip(handFlipBefore);
       }
@@ -2368,12 +2479,9 @@
           fly.style.top = toTop + 'px';
         }
       };
-      // 双 rAF 让浏览器先应用起点样式，再触发 transition
-      if (typeof requestAnimationFrame === 'function') {
-        requestAnimationFrame(() => requestAnimationFrame(start));
-      } else {
-        start();
-      }
+      // 双帧让浏览器先应用起点样式，再触发 transition
+      // （waitTwoFrames 带定时器兜底：rAF 被节流时动画也不会卡在起点）
+      this.waitTwoFrames(start);
 
       // 装备落地前 180ms 让飞牌开始淡出，与装备栏淡入形成「溶接」
       if (dest === 'equip' && typeof SGS.sleep === 'function') {
@@ -2546,12 +2654,16 @@
         const id = el.dataset && el.dataset.id;
         const f = id && firstRects[id];
         if (!f || newIds.indexOf(String(id)) >= 0) return;   // 新牌不参与让位
-        // ★ 正在飞行中的牌（visibility:hidden，等飞牌落地才恢复）不要参与让位：
-        //   它是上一次 flyCard 刚插进来的预测节点，此刻完全看不见，做过渡纯属浪费；
-        //   更糟的是它会带上本轮 invert 的 transform，导致「上一次飞牌起飞那一帧
-        //   量到的落点 = 过渡中的旧坐标」，落地后再弹回真实格子（连摸两张时
-        //   第一张会向左跳 ~70px）。隐藏节点直接跳过，让它按布局瞬移。
-        if (el.style && el.style.visibility === 'hidden') return;
+        // ★ 正在飞行中的牌不要参与让位：
+        //   它是上一次 flyCard / flipInsertIntoHand 刚插进来、还没落地的牌，
+        //   此刻完全看不见，做过渡纯属浪费；更糟的是它会带上本轮 invert 的
+        //   transform，导致「上一次飞牌起飞那一帧量到的落点 = 过渡中的旧坐标」，
+        //   落地后再弹回真实格子（连摸两张时第一张会向左跳 ~70px）。
+        //   判据用 _arriving 登记表（权威）而不是内联 visibility —— 飞行中的
+        //   隐藏靠 .fx-arriving 类，内联样式可能被某次重绘清掉。
+        const aid = id != null ? String(id) : '';
+        if ((el.style && el.style.visibility === 'hidden') ||
+            (aid && this._arriving && this._arriving[aid])) return;
         const r = R(el);
         if (!r || !r.width) return;
         const dx = f.left - r.left, dy = f.top - r.top;
@@ -2584,7 +2696,12 @@
               top: handRect.top + (handRect.height - fallbackH) / 2,
               width: fallbackW, height: fallbackH
             };
-        if (el && el.style) el.style.visibility = 'hidden';
+        // ★ 登记为「正在飞入」并打上 .fx-arriving：飞牌期间任何一次重绘
+        //   重建出来的节点都会继承隐藏状态（见 syncArrivingMask），
+        //   不会在落点位置提前冒出一张真牌。
+        this._arriving[String(c.id)] = Date.now();
+        if (el && el.classList) el.classList.add('fx-arriving');
+        else if (el && el.style) el.style.visibility = 'hidden';
         const fly = document.createElement('div');
         fly.className = 'fly-card drawing';
         fly.style.left = (sr.left + sr.width / 2 - target.width / 2) + 'px';
@@ -2626,22 +2743,21 @@
           rec.fly.style.top = rec.top + 'px';
         });
       };
-      await new Promise((resolve) => {
-        if (typeof requestAnimationFrame === 'function') {
-          requestAnimationFrame(() => requestAnimationFrame(() => { start(); resolve(); }));
-        } else { start(); resolve(); }
-      });
+      await this.waitTwoFrames(start);
 
       await SGS.sleep((opts.delay || 0) + (cards.length - 1) * 110 + 520);
 
       // ⑦ 落地清理：真牌恢复、飞牌移除、FLIP 内联样式清空
-      flies.forEach(({ fly, el }) => {
+      // ★ 恢复必须按 id 覆盖到「当前」节点：飞牌期间若发生过一次 render，
+      //   节点已经被换掉了，恢复旧节点等于没恢复（重影就永远留在那里）。
+      cards.forEach((c) => { delete this._arriving[String(c.id)]; });
+      flies.forEach(({ fly }) => {
         try {
           if (fly.parentNode && fly.parentNode.removeChild) fly.parentNode.removeChild(fly);
           else app.removeChild(fly);
         } catch (e) { /* 已移除 */ }
-        if (el) el.style.visibility = '';
       });
+      this.syncArrivingMask();
       movers.forEach((el) => {
         el.style.transition = '';
         el.style.transform = '';
@@ -2747,11 +2863,8 @@
           rec.fly.style.top = rec.top + 'px';
         });
       };
-      if (typeof requestAnimationFrame === 'function') {
-        requestAnimationFrame(() => requestAnimationFrame(start));
-      } else {
-        start();
-      }
+      // 同上：带兜底的双帧，避免 rAF 停摆时飞牌卡在起点
+      this.waitTwoFrames(start);
 
       // 最后一张的延迟 + .45s 过渡 + 余量
       return SGS.sleep((n - 1) * 110 + 520).then(() => {
@@ -2839,7 +2952,14 @@
         // ★【使用】按钮在点击之前就判断可用性，不再「点了才回退」：
         //   杀次数用完 / 本回合已用酒 / 体力已满时用桃，按钮直接变灰。
         //   全部实时读角色钩子与状态，装备变化或回血后会自动恢复。
-        const shaOk = card && SGS.Cards.isSha(card.type) ? pd.player.canPlaySha() : true;
+        // ★【杀】没有合法目标（距离不够 / 只剩自己）时也置灰：点进去只会
+        //   打开一个没有可点目标的选目标界面，白让玩家再点一次取消。
+        const shaTargetOk = card && SGS.Cards.isSha(card.type) && pd.game &&
+          typeof pd.game.listTargets === 'function'
+          ? pd.game.listTargets(pd.player, { type: 'sha' }, 'sha').length > 0
+          : true;
+        const shaOk = card && SGS.Cards.isSha(card.type)
+          ? (pd.player.canPlaySha() && shaTargetOk) : true;
         const jiuOk = card && card.type === 'jiu' ? !pd.player.jiuUsed : true;
         const taoOk = card && card.type === 'tao'
           ? pd.player.hp < pd.player.maxHp : true;
@@ -2848,7 +2968,19 @@
         //   直接灰掉，不再「点了才回退」。技能按钮（如【渐营】把这张牌
         //   当基本牌）由 pushSkillButtons 独立判断，不受这里影响。
         const wuxieOk = isResponseOnly(card) ? hasWuXieTarget(pd) : true;
-        const basicUsable = !!card && shaOk && jiuOk && taoOk && wuxieOk && (
+        // ★ 锦囊：当前没有合法目标（顺手牵羊距离不够 / 对手无牌可拆 /
+        //   借刀杀人场上没有武器…）时同样直接置灰。判据就是规则层的
+        //   Tricks.canUse（纯函数），保证「按钮能不能点」与「点了会不会被拒」
+        //   用的是同一套条件。
+        const trickOk = !(card && SGS.Cards.isTrick(card.type)) ? true
+          : (pd.game && SGS.Tricks && typeof SGS.Tricks.canUse === 'function'
+            ? !!SGS.Tricks.canUse(pd.game, pd.player, card).ok : true);
+        // ★【闪电】同一角色判定区只能有一张：已有闪电时【使用】按钮直接置灰，
+        //   不再等点了以后由 rules 层拒绝（规则层仍保留复核）。
+        const shandianDup = !!(card && card.type === 'shandian' &&
+          ((pd.player && pd.player.delayed) || []).some((d) => d && d.type === 'shandian'));
+        const basicUsable = !!card && shaOk && jiuOk && taoOk && wuxieOk &&
+          trickOk && !shandianDup && (
           SGS.Cards.isSha(card.type) || card.type === 'tao' || card.type === 'jiu' ||
           SGS.Cards.isTrick(card.type) || SGS.Cards.isEquip(card.type)
         );
@@ -2983,6 +3115,8 @@
         const list = (pd.choices || []).map((c, i) => ({
           label: c.label,
           cls: i === 0 ? 'primary' : '',
+          // ★【渐营】六选一：当前条件下不可转化的选项直接置灰
+          disabled: !!c.disabled,
           onClick: () => this.finish(c.value)
         }));
         pushSkillButtons(list, this, pd, 'play', null, { forceDisabled: true });
@@ -3079,6 +3213,20 @@
         }];
         if (pd.cancelLabel) {
           list.push({ label: pd.cancelLabel, onClick: () => this.finish(null) });
+        } else {
+          // ★ 防死局兜底：候选牌凑不满 need 时（手牌为空 / 全被 filter 排除），
+          //   【确认】永远点不亮，再没有取消就彻底卡住（雌雄双股剑无手牌
+          //   就是这个症状）。这里自动补一个「取消」，各调用方都按 null 处理。
+          const eqCards = (pd.allowEquip && pd.player && pd.player.equips)
+            ? Object.keys(pd.player.equips)
+              .map((k) => pd.player.equips[k]).filter(Boolean)
+            : [];
+          const okCard = (c) => !!c && (!pd.pickFilter || pd.pickFilter(c));
+          const okCount = (pd.player.hand || []).filter(okCard).length +
+            eqCards.filter(okCard).length;
+          if (okCount < pd.need) {
+            list.push({ label: '取消', onClick: () => this.finish(null) });
+          }
         }
         // ★ 全部技能按钮：青龙偃月刀追加杀界面按 qinglong 场景判断
         //   （龙魂 ♦→火杀、龙胆 闪→杀、渐营 当基本牌…可点，其余灰色占位）；
@@ -3356,6 +3504,9 @@
           this.setHint('【无懈可击】只能在目标锦囊牌生效前作为响应打出；' +
             '当前没有可抵消的目标锦囊牌，【使用】按钮已置灰。' +
             '等有无懈询问时再使用，或点技能按钮把它当别的牌转化。');
+        } else if (card.type === 'shandian' &&
+                   (pd.player.delayed || []).some((d) => d && d.type === 'shandian')) {
+          this.setHint('【闪电】：你的判定区已有一张【闪电】，不能再次使用，【使用】按钮已置灰。');
         } else if (SGS.Cards.isTrick(card.type)) {
           this.setHint('【' + card.name + '】：' + SGS.Cards.defs[card.type].desc + ' 点【使用】发动。');
         } else if (SGS.Cards.isEquip(card.type)) {
@@ -3423,6 +3574,12 @@
         this.refreshActions();
 
       } else if (pd.mode === 'discard') {
+        // ★【藏拙】等「不计入手牌上限」的牌：弃它不会减少有效张数，
+        //   点了一次也白弃 → 直接拦下（与上面的置灰口径一致）。
+        if (typeof pd.skip === 'function' && pd.skip(card)) {
+          this.log('【' + card.name + '】不计入手牌上限，无需弃置。', 'warn');
+          return;
+        }
         const i = pd.selected.indexOf(id);
         if (i >= 0) {
           // 再点已选中的牌 → 取消选择（减选）
@@ -3990,10 +4147,25 @@
     }
 
     /** 弃牌阶段：返回要弃置的牌 id 数组 */
-    waitDiscard(player, need, game) {
+    /**
+     * 弃牌阶段的选牌界面。
+     * opts.skip 谓词：返回 true 的牌「不计入手牌上限」（【藏拙】的锦囊牌），
+     *   既不参与计数也不可点 —— 弃它不会减少有效张数，点了也白弃。
+     *   置灰 + 点击拦截两处都要做，保证这一次弃牌一定能把有效张数降到上限。
+     */
+    waitDiscard(player, need, game, opts) {
+      opts = opts || {};
+      const skip = typeof opts.skip === 'function' ? opts.skip : null;
+      const pool = (player && player.hand)
+        ? player.hand.filter((c) => !(skip && skip(c))) : [];
+      // ★ 防御：可选牌为空时不该再等玩家点牌（确认按钮永远点不亮 → 死局）。
+      if (!pool.length) return Promise.resolve([]);
+      const n = Math.max(1, Math.min(need || 1, pool.length));
       return new Promise((resolve) => {
-        this.pending = { mode: 'discard', player, game, resolve, selected: [], need };
-        this.setHint('弃牌阶段：请点选 ' + need + ' 张手牌弃置，然后确认。');
+        this.pending = {
+          mode: 'discard', player, game, resolve, selected: [], need: n, skip
+        };
+        this.setHint('弃牌阶段：请点选 ' + n + ' 张手牌弃置，然后确认。');
         this.refreshActions();
         this.render(game);
       });

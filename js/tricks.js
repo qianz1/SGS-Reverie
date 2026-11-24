@@ -582,8 +582,20 @@
 
     // ① 目标解析：other 显式点一名；all / all-others 自动全体并一对多画黄线；
     //    self 只对自己。取消（空数组）则牌留在手里、不消耗。
-    const chosen = await game.selectTargets(user, card, check.targets);
+    // ★ opts.chosenTargets：技能已经自行选好目标（如【翦灭】判出决斗）
+    //   时直接复用，避免让玩家再点一次；仍按合法目标列表复核。
+    const preset = opts.chosenTargets;
+    const presetOk = Array.isArray(preset) && preset.length &&
+      preset.every((t) => t && check.targets.indexOf(t) >= 0);
+    const chosen = presetOk ? preset : await game.selectTargets(user, card, check.targets);
     if (!chosen || !chosen.length) return false;
+    // ★ 牌语音统一在「目标选定之后」播：需要手动选目标的锦囊（顺手牵羊 /
+    //   火攻 / 借刀 / 铁索连环…）取消选目标时不再白播语音；self / all /
+    //   all-others 这类无需手动选目标的牌没有等待，时序与原来完全一致。
+    const real = opts.realCard || card;
+    if (typeof game.playCardVoice === 'function') {
+      game.playCardVoice(user, real, card.type);
+    }
     const target = chosen[0];
     const mode = SGS.Cards.targetOf(card.type).mode;
     // ★ 非延时锦囊共用一份无懈上下文；单体在生效前问一次，群体在各自函数里逐个问。
@@ -597,7 +609,7 @@
     //    延时锦囊则置入目标的判定区（闪电的伤害来源记在牌上，传到下家后仍保留）。
     // ★ opts.realCard：【火计】把红色「牌」当【火攻】时，card 只是「当作牌」，
     //   飞牌 / 离手 / 进弃牌堆仍用原来的实体牌，弃牌堆不会混进假火攻。
-    const real = opts.realCard || card;
+    //   （real 已在目标选定后取出，牌语音也用的是它。）
     // ★【连环】：♣ 牌当【铁索连环】使用时写发动记录，UI.log 兜底播
     //   技能大字 + SHU-PangTong_LianHuan.webm（真铁索多连一人的记录在
     //   Game.selectTargets 里写，两处不会重复）。

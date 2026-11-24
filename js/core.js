@@ -194,7 +194,10 @@
   SGS.canUseSkillAction = function (player, name, scene) {
     const action = SGS.findSkillAction(player, name, scene);
     if (!action) return false;
-    if (player && player.usedSkillActions && player.usedSkillActions[name]) return false;
+    // once!==false 的是限定技（每局一次）；翦灭这类「出牌阶段限一次」
+    // 自己用 usable 判断本回合状态，不写进 usedSkillActions。
+    if (action.once !== false &&
+        player && player.usedSkillActions && player.usedSkillActions[name]) return false;
     if (typeof action.usable === 'function' &&
         !action.usable(player, scene || 'play')) return false;
     return true;
@@ -209,4 +212,13 @@
 
   /** 由 ui.js 注入的日志函数，纯逻辑层可在没有 UI 的环境里安全调用 */
   SGS.log = null;
+
+  /**
+   * 由 Game 注入的「手牌离手」回调：Player.removeCard() 移走手牌后触发。
+   * 【伤逝】的触发条件是「手牌数小于 X 后」，所以必须挂在这里而不是
+   * 只挂失血钩子。同一时刻只有一个权威 Game，回调直接指向它的排队入口
+   * （Game.queueHandBelowX —— 只登记，等当前同步流程走完再结算，避免摸牌
+   * 动画插进调用方的动画里）；没有 Game（纯 Player 自测）时保持 null，安全跳过。
+   */
+  SGS.onHandRemoved = null;
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -317,7 +317,8 @@
      * 通用二选一：作为【雌雄双股剑】目标时，手牌多就弃一张、少就令对方摸牌。
      */
     async askChoice(player, opts) {
-      const choices = (opts && opts.choices) || [];
+      // ★【渐营】等面板里被置灰的选项，AI 同样不能选
+      const choices = ((opts && opts.choices) || []).filter((c) => !c.disabled);
       const discard = choices.find((c) => c.value === 'discard');
       const draw = choices.find((c) => c.value === 'draw');
       if (discard && player.hand.length > 2) return discard.value;

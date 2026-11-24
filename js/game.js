@@ -35,9 +35,19 @@
 
       const chars = SGS.Characters;
       const humanChar = chars[humanCharId] || chars.zhangfei;
-      const aiChar = (opts.remoteCharId && chars[opts.remoteCharId]) ||
-        Object.keys(chars).map((k) => chars[k])
-          .find((c) => c.id !== humanChar.id) || chars.zhaoyun;
+      // ★ 1v1 模式：AI 从「除玩家已选之外」的全部武将里随机挑一个；
+      //   未指定 mode 的自测入口保持原来的确定性（首个不同角色），
+      //   联机则由主机下发 remoteCharId，绝不本地随机覆盖。
+      const others = Object.keys(chars).map((k) => chars[k])
+        .filter((c) => c && c.id !== humanChar.id);
+      let aiChar = (opts.remoteCharId && chars[opts.remoteCharId]) || null;
+      if (!aiChar && this.mode === '1v1' && others.length) {
+        const rng = typeof opts.rng === 'function' ? opts.rng : Math.random;
+        const idx = Math.max(0, Math.min(others.length - 1,
+          Math.floor(rng() * others.length)));
+        aiChar = others[idx];
+      }
+      aiChar = aiChar || others[0] || chars.zhaoyun;
 
       this.human = new SGS.Player(humanChar, true);
       this.aiPlayer = new SGS.Player(aiChar, false);
@@ -52,6 +62,12 @@
         this.players = SGS.assignSeats(this.players, this.mode, opts.rng);
       }
       this.players.forEach((p, i) => { if (!p.seat) p.seat = i + 1; });
+      // ★【伤逝】桥接：Player.removeCard() 移走手牌后回到这里复查
+      //   「手牌数 < X」；同时保留失血时的复查（X 变大也会让条件成立）。
+      //   ★ 这里只【排队】，不在当前同步栈里立刻摸牌 —— 见 queueHandBelowX。
+      this._handBelowXPending = [];
+      this._handBelowXFlush = null;
+      SGS.onHandRemoved = (player) => this.queueHandBelowX(player);
       this.ai = new SGS.AI(this);
 
       this.current = 0;   // 0 = 一号位（先手），不再恒为玩家
@@ -304,7 +320,8 @@
      * 刻意不放在 presentCard() 里：那个方法还负责判定亮牌、五谷亮牌、
      * 被拆/被牵、弃牌、装备替换、火攻展示等「牌出场但不是使用/打出」的
      * 场合，会误播。只在下面几个语义明确的时点调用：
-     *   · applyPlay   出牌阶段所有使用（含杀 / 锦囊 / 酒 / 技能转化）
+     *   · applyPlay   出牌阶段的桃 / 酒 / 装备 / 基本牌转化
+     *   · useSha / Tricks.use  目标确定之后再播（杀 / 锦囊，取消选目标不播）
      *   · askRespond  打出【闪】/【杀】响应（含 AOE、决斗）
      *   · askWuXie    使用或转化使用【无懈可击】
      *   · brink       濒死用【桃】/【酒】自救
@@ -432,6 +449,73 @@
     }
 
     /**
+     * ★【伤逝】「手牌离手」复查的排队入口。
+     *
+     * 为什么不能在这里直接摸牌（曾经的做法，也是「立刻执行」特例的残留）：
+     *   removeCard() 几乎总发生在别的流程中间 —— 出牌打出一张、翦灭弃色、
+     *   过河拆桥拆牌…… 如果在同一同步栈里立刻 drawCards()，摸牌动画就会
+     *   插进对方那套动画里；更要紧的是调用方在 removeCard 之后往往还有一次
+     *   ui.render()，那次重绘会把「正在飞入手牌」的真牌节点重建成可见节点，
+     *   于是飞牌期间落点位置就冒出一张真牌 —— 表现就是「伤逝的飞牌和普通
+     *   角色不一样，落点位置还会渲染」。
+     *   改成登记 + 微任务结算：等这一轮同步工作（含调用方随后的 render）
+     *   全部走完，再按普通 drawCards 摸牌，动画与正常摸牌完全一致。
+     *
+     * 同一角色在一轮里可能被多次 removeCard，排队时去重，只在 flush 时
+     * 复查一次（hook 内部仍会再判一次「手牌数 < X」，不会多摸）。
+     */
+    queueHandBelowX(player) {
+      if (!player) return;
+      const q = this._handBelowXPending || (this._handBelowXPending = []);
+      if (q.indexOf(player) < 0) q.push(player);
+      if (this._handBelowXFlush) return;
+      this._handBelowXFlush = Promise.resolve()
+        .then(() => this.flushHandBelowX())
+        .catch((e) => {
+          if (typeof console !== 'undefined' && console.warn) {
+            try { console.warn('[game] 伤逝复查失败', e); } catch (e2) {}
+          }
+        })
+        .then(() => {
+          this._handBelowXFlush = null;
+          // ★ 收尾竞态兜底：flush 判空返回 与 清空标志 之间若又有人入队，
+          //   这里补排一次（queue 内部去重，hook 还会再判条件，不会多摸）。
+          const rest = this._handBelowXPending;
+          if (rest && rest.length) this.queueHandBelowX(rest[0]);
+        });
+    }
+
+    /** 依次结算排队中的「手牌数 < X」复查 */
+    async flushHandBelowX() {
+      for (;;) {
+        const q = this._handBelowXPending;
+        if (!q || !q.length) return;
+        const p = q.shift();
+        await this.checkHandBelowX(p);
+      }
+    }
+
+    /** 等排队中的复查全部结算完（收尾 / 自测用） */
+    handBelowXSettled() {
+      return this._handBelowXFlush || Promise.resolve();
+    }
+
+    /**
+     * ★【伤逝】统一检查入口：X = 已损失体力值，手牌数小于 X 后摸至 X 张。
+     * 触发条件只看「手牌数 < X」，与是否失去体力无关；调用方有三处：
+     *   · queueHandBelowX —— 任何手牌离手（Player.removeCard 统一收口，延后结算）
+     *   · Game.damage / 矢北直接失血 —— X 因体力流失而变大（当场 await，
+     *     摸到的【桃】要赶在濒死结算之前到手）
+     * 摸牌走常规 drawCards（含飞牌动画）；调用前已判条件，不会重复摸。
+     */
+    async checkHandBelowX(player) {
+      if (!player || (typeof player.isDead === 'function' && player.isDead())) return;
+      const hook = player.skill && player.skill.onHandBelowX;
+      if (typeof hook !== 'function') return;
+      await hook(player, this);
+    }
+
+    /**
      * 摸牌并播放动画。
      *
      *  · 玩家自己摸牌：ui.flipInsertIntoHand() 先把牌插进手牌 —— 旧牌 FLIP
@@ -537,7 +621,7 @@
     async runTurn() {
       const p = this.actor;
       p.resetTurn();
-      // ★【矢北】「每回合第一次 / 第二次受到伤害」：每个回合开始时，
+      // ★【矢北】「每回合第一次回血，此后每次失去体力」：每个回合开始时，
       //   所有角色的受伤计数都清零（不只行动方），对手回合里挨打也要计数。
       this.players.forEach((q) => { q.turnDamageCount = 0; q.shibeiHealed = false; });
       if (SGS.log) SGS.log('── 第 ' + this.round + ' 轮 · ' + p.name + ' 的回合 ──', 'turn');
@@ -857,10 +941,17 @@
             if (SGS.log) SGS.log('【渐营】本出牌阶段已经发动过了。', 'warn');
             return false;
           }
+          // ★ 六选一按「此刻是否真的可用」置灰：满血桃 / 已用酒 / 杀次数用完
+          //   或无合法目标，都不该再让玩家点进去才被规则层拒绝。
+          const shaUsable = p.canPlaySha() &&
+            this.listTargets(p, { type: 'sha' }, 'sha').length > 0;
           const choice = await this.askChoice(p, {
             desc: '【渐营】：将这张牌当哪一张基本牌使用？',
             choices: SGS.Cards.BASIC_TYPES.map((t) => ({
-              label: '当【' + SGS.Cards.nameOf(t) + '】使用', value: t
+              label: '当【' + SGS.Cards.nameOf(t) + '】使用', value: t,
+              disabled: t === 'tao' ? p.hp >= p.maxHp
+                : t === 'jiu' ? p.jiuUsed
+                  : SGS.Cards.isSha(t) ? !shaUsable : false
             }))
           });
           if (!choice) return false;
@@ -875,7 +966,8 @@
             // 标记「当作牌」：selectTargets 不再重复写【连环】的额外目标日志
             viaSkill: true
           });
-          this.playCardVoice(p, card, conv.to);
+          // ★ 牌语音改由 Tricks.use() 在「目标选定之后」统一播，
+          //   取消目标选择时不再白播（无中生有等无需手动选目标的牌时序不变）。
           return await SGS.Tricks.use(this, p, asCard, {
             realCard: card, asName: SGS.Cards.nameOf(conv.to),
             asType: conv.to,
@@ -937,9 +1029,9 @@
       }
 
       // ④ 锦囊牌：按牌面直接使用，无需技能按钮，效果结算交给 tricks.js
-      //    （合法性校验含「其他有牌角色」与「距离为 1」判定）
+      //    （合法性校验含「其他有牌角色」与「距离为 1」判定；
+      //     牌语音由 Tricks.use() 在目标确定后统一播）
       if (SGS.Cards.isTrick(card.type)) {
-        this.playCardVoice(p, card, card.type);
         return await SGS.Tricks.use(this, p, card);
       }
 
@@ -995,6 +1087,13 @@
       //   所以 ctx.noShaCount 时跳过「次数已用完」的拦截（渐营条件仍需满足）。
       if (SGS.Cards.isSha(type) && !ctx.noShaCount && !p.canPlaySha()) {
         if (SGS.log) SGS.log('本回合【杀】的使用次数已用完。', 'warn');
+        return false;
+      }
+      // ★ 与【渐营】选项置灰同口径：没有合法目标也拒绝转化（青龙追加杀
+      //   已有 chosenTarget，不受影响）。
+      if (SGS.Cards.isSha(type) && !ctx.chosenTarget &&
+          this.listTargets(p, asCard || card, 'sha').length === 0) {
+        if (SGS.log) SGS.log('当前没有【杀】的合法目标，不能这样转化。', 'warn');
         return false;
       }
       if (type === 'tao' && p.hp >= p.maxHp) {
@@ -1089,12 +1188,21 @@
       if (!SGS.canUseSkillAction(player, name, scene)) return false;
       const action = SGS.findSkillAction(player, name, scene);
       if (!action) return false;
-      if (!player.usedSkillActions) player.usedSkillActions = {};
-      player.usedSkillActions[name] = true;
-      // 和日志兜底同一入口，skillFX 自带短时去重，不会播两遍
-      this.announceSkill(player, name);
+      if (action.once !== false) {
+        if (!player.usedSkillActions) player.usedSkillActions = {};
+        player.usedSkillActions[name] = true;
+      }
+      // 和日志兜底同一入口，skillFX 自带短时去重，不会播两遍。
+      // ★ action.announce === false：由 action.run() 自己在「选完目标」等
+      //   更合适的时机播一次（【翦灭】要求语音在选完目标后只响一次，
+      //   点按钮就播会导致取消选目标也响、并与 run() 内的播放重复）。
+      if (action.announce !== false) this.announceSkill(player, name);
       const ok = await action.run(this, player, scene || 'play');
       this.ui.render(this);
+      // 一次性 / 限次技能用掉后立刻刷新右下按钮，不等下一次 waitPlay
+      if (this.ui && typeof this.ui.refreshActions === 'function') {
+        this.ui.refreshActions();
+      }
       return ok !== false;
     }
 
@@ -1410,16 +1518,24 @@
      * 玩家侧选项走 ui.waitChoice，弃牌走 ui.waitPick（默认手牌选取动画）。
      */
     async cixiongEffect(user, target) {
+      // ★ 目标手里没有牌时，「弃置一张手牌」这一项必须直接置灰：
+      //   点进去只会打开一个无牌可选、也没有取消入口的选牌界面 ——
+      //   玩家选不了、退不出，整局卡死。（用户实测到的 bug）
+      const hasHand = !!(target && target.hand && target.hand.length);
       const choice = await this.askChoice(target, {
         name: '雌雄双股剑',
         desc: '【雌雄双股剑】：请选择一项',
         choices: [
-          { label: '弃置一张手牌', value: 'discard' },
+          { label: '弃置一张手牌', value: 'discard', disabled: !hasHand },
           { label: '令 ' + user.name + ' 摸一张牌', value: 'draw' }
         ],
         context: 'cixiong'
       });
-      if (choice === 'discard') {
+      if (choice !== 'discard' && choice !== 'draw') {
+        this.ui.render(this);
+        return;
+      }
+      if (choice === 'discard' && hasHand) {
         let id = null;
         if (SGS.isDecider(target) && this.ui && typeof this.ui.waitPick === 'function') {
           id = await this.ui.waitPick(target, this, {
@@ -1428,18 +1544,22 @@
           });
         }
         const card = (id && target.hand.find((c) => c.id === id)) || target.hand[0] || null;
-        if (!card) return;
-        target.removeCard(card.id);
-        await this.presentCard(card, target, { dest: 'showcase', note: '雌雄双股剑弃置' });
-        this.deck.discard(card);
-        if (SGS.log) {
-          SGS.log(target.name + ' 选择弃置一张手牌【' + card.name + '】（【雌雄双股剑】）。', 'sys');
+        if (card) {
+          target.removeCard(card.id);
+          await this.presentCard(card, target, { dest: 'showcase', note: '雌雄双股剑弃置' });
+          this.deck.discard(card);
+          if (SGS.log) {
+            SGS.log(target.name + ' 选择弃置一张手牌【' + card.name + '】（【雌雄双股剑】）。', 'sys');
+          }
+          this.ui.render(this);
+          return;
         }
-      } else if (choice === 'draw') {
-        const got = await this.drawCards(user, 1);
-        if (SGS.log) {
-          SGS.log(user.name + ' 因【雌雄双股剑】摸了 ' + got.length + ' 张牌。', 'sys');
-        }
+        // 走到这里说明「选了弃牌、其实一张牌都没有」（界面没拦住的老客户端 /
+        // AI 决策与当前手牌不一致）→ 按规则退化成另一项，绝不留死局。
+      }
+      const got = await this.drawCards(user, 1);
+      if (SGS.log) {
+        SGS.log(user.name + ' 因【雌雄双股剑】摸了 ' + got.length + ' 张牌。', 'sys');
       }
       this.ui.render(this);
     }
@@ -1895,8 +2015,8 @@
           }
         }
         if (revived) {
-          await this.damage(target, attacker, this.shaDamageAmount(attacker, target, dmg),
-            dmgType, { armorNegated });
+          await this.damage(target, attacker, dmg,
+            dmgType, { armorNegated, sha: true });
         }
       } else {
         if (SGS.log) SGS.log(target.name + ' 没有打出【闪】。', 'warn');
@@ -1937,8 +2057,8 @@
             });
             if (yes) await this.qilinDiscard(attacker, target);
           }
-          await this.damage(target, attacker, this.shaDamageAmount(attacker, target, dmg),
-            dmgType, { armorNegated });
+          await this.damage(target, attacker, dmg,
+            dmgType, { armorNegated, sha: true });
         }
       }
 
@@ -2248,7 +2368,9 @@
       } else if (this.ai && typeof this.ai.askChoice === 'function') {
         return await this.ai.askChoice(player, opts);
       }
-      return (opts.choices && opts.choices[0] && opts.choices[0].value) || null;
+      // 无界面兜底也只看可用项（【渐营】置灰的技能不该被自动选中）
+      const usable = (opts.choices || []).filter((c) => !c.disabled);
+      return (usable[0] && usable[0].value) || null;
     }
 
     /**
@@ -2376,18 +2498,33 @@
      * ★【铁索连环】：属性伤害（火 / 雷）落在连环状态角色身上时，会依次
      *   传导给其他连环角色（同来源、同程度、同属性），并重置所有受伤害者；
      *   opts.noChain = 传导出来的伤害不再二次传导，opts.chainFixed = 伤害点数
-     *   已经固定，不再因目标自己的藤甲再次 +1。
+     *   已经固定，不再因目标自己的藤甲再次 +1。opts.sha = 这是【杀】的伤害，
+     *   才参与「造成伤害时」【古锭刀】加伤（绝情转体力流失时不参与）。
      */
     async damage(target, source, amount, dmgType, opts) {
       amount = amount || 1;
       dmgType = dmgType || 'normal';
       opts = opts || {};
       const armorNegated = !!opts.armorNegated;
+      // ★【绝情】：来源技能把「即将造成的伤害」改为失去体力 —— 不吃藤甲 / 白银狮子，
+      //   不触发「受到伤害后」钩子，也不做属性伤害的连环传导；伤害音效、
+      //   受击特效、濒死 / 阵亡结算完全照常。
+      const asLoss = !!(source && typeof source.hook === 'function' &&
+        source.hook('damageAsLoss', target, amount, dmgType, opts));
+      // ★【古锭刀】：锁定技，【杀】「造成伤害时」目标无手牌则伤害 +1。
+      //   绝情把整次伤害改为失去体力，不存在「造成伤害」这个时点，因此吃不到；
+      //   所以必须放在 asLoss 判定之后（和藤甲加伤同一层），不能在 useSha 里预处理。
+      //   shaDamageAmount(..., 0) 的返回值即加成点数（0 或 1），日志也在这里写。
+      const gudingBonus = (!asLoss && opts.sha && !opts.chainFixed && source &&
+        typeof this.shaDamageAmount === 'function')
+        ? this.shaDamageAmount(source, target, 0) : 0;
       // ★ 传导伤害「同程度」：沿用上游已经算好的点数，不再叠加藤甲加伤
-      const fireBonus = (!armorNegated && !opts.chainFixed && dmgType === 'fire' && SGS.Equipment)
+      const fireBonus = (!asLoss && !armorNegated && !opts.chainFixed &&
+        dmgType === 'fire' && SGS.Equipment)
         ? SGS.Equipment.fireDamageBonus(target) : 0;
-      const before = amount + fireBonus;
-      const cap = (armorNegated || !SGS.Equipment) ? Infinity : SGS.Equipment.damageCap(target);
+      const before = amount + fireBonus + gudingBonus;
+      const cap = (asLoss || armorNegated || !SGS.Equipment)
+        ? Infinity : SGS.Equipment.damageCap(target);
       const total = before > cap ? cap : before;
       const capped = before > cap;
       target.hp -= total;
@@ -2400,7 +2537,9 @@
       this.playDamageSound(dmgType, total, soundOpts);
       if (SGS.log) {
         const dmgName = dmgType === 'fire' ? '火焰' : dmgType === 'thunder' ? '雷电' : '';
-        let txt = target.name + ' 受到 ' + total + ' 点' + dmgName + '伤害';
+        let txt = asLoss
+          ? target.name + ' 失去 ' + total + ' 点体力（【绝情】：伤害视为失去体力）'
+          : target.name + ' 受到 ' + total + ' 点' + dmgName + '伤害';
         if (fireBonus) txt += '（【藤甲】火焰伤害 +1）';
         if (capped) txt += '（【白银狮子】将 ' + before + ' 点伤害减至 ' + total + ' 点）';
         SGS.log(txt + '，体力 ' + Math.max(0, target.hp) + '/' + target.maxHp + '。', 'dmg');
@@ -2411,18 +2550,23 @@
       if (this.ui && typeof this.ui.shakeHero === 'function') {
         this.ui.shakeHero(target, total, dmgType);
       }
+      // ★【伤逝】复查「手牌数 < X」：扣血当刻 X 变大，可能让手牌数跌破 X。
+      //   仍在濒死之前，摸到的【桃】可立刻用于自救。
+      await this.checkHandBelowX(target);
+
       this.ui.render(this);
       await SGS.sleep(320);
 
-      // ★【矢北】等「受到伤害后」技能：本回合第 1 次回 1 血、第 2 次失去 1 血。
-      //   放在濒死结算之前，所以回血能救回致命伤害、失去体力可能触发濒死。
-      target.turnDamageCount = (target.turnDamageCount || 0) + 1;
-      const dmgHook = target.skill && target.skill.onDamaged;
-      if (typeof dmgHook === 'function') {
-        await dmgHook(this, target, target.turnDamageCount,
-          { amount: total, source: source, dmgType: dmgType });
+      // ★【矢北】等「受到伤害后」技能：本回合第 1 次回 1 血，此后每次失去 1 血。
+      //   绝情把伤害改成失去体力，因此不进入这里（不算「受到伤害」）。
+      if (!asLoss) {
+        target.turnDamageCount = (target.turnDamageCount || 0) + 1;
+        const dmgHook = target.skill && target.skill.onDamaged;
+        if (typeof dmgHook === 'function') {
+          await dmgHook(this, target, target.turnDamageCount,
+            { amount: total, source: source, dmgType: dmgType });
+        }
       }
-
       if (target.hp <= 0) await this.brink(target);
       if (target.hp <= 0 && !this.over) {
         await this.onDeath(target);   // 1v1 的胜负结算放到死亡弃置之后
@@ -2432,7 +2576,7 @@
       // ★【铁索连环】属性伤害传导：火 / 雷伤害命中连环状态角色后，
       //   按逆时针顺序依次传给其他连环角色（同来源、同程度、同属性）。
       //   首目标即使濒死 / 阵亡也照样传导；所有受伤害者随后重置武将牌。
-      const elemental = dmgType === 'fire' || dmgType === 'thunder';
+      const elemental = !asLoss && (dmgType === 'fire' || dmgType === 'thunder');
       if (elemental && target.chained && !opts.noChain && this.players) {
         const start = Math.max(0, this.players.indexOf(target));
         const spread = [];
@@ -2552,8 +2696,13 @@
     /**
      * ⑤ 弃牌阶段：手牌数超过当前体力时，弃到等于体力值。
      * ★【藏拙】：若本回合没用过锦囊牌，锦囊牌（含延时锦囊）不计入手牌上限。
-     *   这里按「有效张数 = 手牌 - 免计张数」算 need，并在弃完后重新计算，
-     *   直到有效张数达标（玩家若弃的是免计牌，会再请他补弃，不会卡死）。
+     *   这里按「有效张数 = 手牌 - 免计张数」算 need。
+     * ★ 弃牌阶段只发起一次弃牌（适用所有角色）：弃牌途中「手牌数小于 X 后」
+     *   的补牌技能（典型是张春华【伤逝】：X = 已损失体力）会立刻把牌摸回来，
+     *   若弃完再判一次 over()，就会「弃一张 → 摸回一张 → 再弃」无限循环
+     *   （用户实测：1 体力 2 张牌，弃 1 张触发伤逝回到 2 张，永远弃不完）。
+     *   一次弃牌必然达标：need 只按计入上限的牌计算，waitDiscard 把免计牌
+     *   置灰不可选，AI 的 pickDiscards 也已按同一口径优先弃非免计牌。
      */
     async phaseDiscard(p) {
       const exempt = (c) => (typeof p.hook === 'function')
@@ -2574,36 +2723,38 @@
           (limit - p.hp) + (free ? '；' + free + ' 张锦囊牌不计入上限' : '') + '）。');
       }
 
-      let guard = 0;
-      while (over() > 0 && guard++ < 8 && !this.over && p.hand.length) {
-        const need = over();
-        let ids;
-        if (SGS.isDecider(p)) {
-          ids = await this.ui.waitDiscard(p, need, this);
-        } else {
-          ids = this.ai.pickDiscards(p, need);
-          await SGS.sleep(320);
-        }
-
-        // ★ 弃掉的牌一次性全部亮出：玩家侧多张飞牌同时起飞、同时落地，
-        //   展示区一次性让位，落地后才统一进弃牌堆 —— 不再一张张串行蹦。
-        //   AI 手牌不可见，自动退化成原来的逐张亮出；展示区标签条数不变。
-        //   图片下方标「弃置」，展示区保留到本角色回合结束才清空。
-        const cards = (ids || []).map((id) => p.hand.find((c) => c.id === id)).filter(Boolean);
-        if (cards.length) {
-          await this.presentCards(cards, p, {
-            dest: 'showcase', note: '弃置',
-            from: p.isHuman ? undefined : 'hero'
-          });
-          for (const card of cards) await this.discardConsumed(p, card);
-        }
-        if (!cards.length) break;   // 界面没返回有效牌，避免死循环
-        if (SGS.log) {
-          SGS.log(p.name + ' 弃置 ' + cards.length + ' 张：' +
-            (cards.map((c) => c.name).join('、') || '无') + '。');
-        }
-        this.ui.render(this);
+      // ★ 只发起一次弃牌：need 在交互前定死，弃完不再复查是否仍超限。
+      const need = over();
+      let ids;
+      if (SGS.isDecider(p) && this.ui && typeof this.ui.waitDiscard === 'function') {
+        // skip：把「不计入上限」的牌（藏拙的锦囊）置灰，保证这一次选出的
+        // 牌一定能让有效张数降到上限以内。
+        ids = await this.ui.waitDiscard(p, need, this, { skip: exempt });
+      } else {
+        ids = this.ai.pickDiscards(p, need);
+        await SGS.sleep(320);
       }
+
+      // ★ 弃掉的牌一次性全部亮出：玩家侧多张飞牌同时起飞、同时落地，
+      //   展示区一次性让位，落地后才统一进弃牌堆 —— 不再一张张串行蹦。
+      //   AI 手牌不可见，自动退化成原来的逐张亮出；展示区标签条数不变。
+      //   图片下方标「弃置」，展示区保留到本角色回合结束才清空。
+      const cards = (ids || []).map((id) => p.hand.find((c) => c.id === id)).filter(Boolean);
+      if (!cards.length) {
+        if (SGS.log) SGS.log(p.name + '【弃牌阶段】未弃置手牌。', 'sys');
+        this.ui.render(this);
+        return;
+      }
+      await this.presentCards(cards, p, {
+        dest: 'showcase', note: '弃置',
+        from: p.isHuman ? undefined : 'hero'
+      });
+      for (const card of cards) await this.discardConsumed(p, card);
+      if (SGS.log) {
+        SGS.log(p.name + ' 弃置 ' + cards.length + ' 张：' +
+          (cards.map((c) => c.name).join('、') || '无') + '。');
+      }
+      this.ui.render(this);
     }
 
     // ⑥ 结束阶段：酒加成只在本回合有效，过期作废；展示区留到回合真正结束再清

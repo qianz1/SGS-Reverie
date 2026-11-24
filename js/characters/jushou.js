@@ -18,8 +18,8 @@
  *   矢北（锁定技）
  *     Game.damage() 每次伤害后回调 onDamaged(game, player, count)：
  *       本回合第 1 次 → 回复 1 点体力；
- *       本回合第 2 次 → 失去 1 点体力；
- *       第 3 次及以后不再触发。计数由 Game.runTurn() 每回合清零。
+ *       此后本回合每次（第 2、3、4… 次）→ 失去 1 点体力，没有次数上限。
+ *       计数由 Game.runTurn() 每回合清零；失去体力可能触发濒死。
  *
  * 立绘：assets/characters/QUN-JuShou.webp（core.js 自动补势力前缀）。
  */
@@ -47,9 +47,9 @@
   const skill = {
     name: '渐营',
     titles: '渐营 · 矢北',
-    desc: '渐营：当你于出牌阶段使用牌时，若此牌与你于此阶段使用的上一张牌花色或点数相同，则你可以摸一张牌（直接摸牌）；' +
-          '出牌阶段限一次，你可以将一张牌（含装备区）当任意一张基本牌使用，若你于本阶段使用的上一张牌有花色，则此牌花色视为与该牌相同。｜' +
-          '矢北（锁定技）：你每回合第一次受到伤害后，回复1点体力；你每回合第二次受到伤害后，失去1点体力。',
+    desc: '渐营：当你于出牌阶段使用牌时，若此牌与你于此阶段使用的上一张牌花色或点数相同，则你可以摸一张牌；' +
+          '出牌阶段限一次，你可以将一张牌当任意一张基本牌使用，若你于本阶段使用的上一张牌有花色，则此牌花色视为与该牌相同。｜' +
+          '矢北（锁定技）：你每回合第一次受到伤害后，回复1点体力，此后你本回合每次受到伤害后均失去1点体力。',
     active: true,
 
     /** ② 出牌阶段限一次的「当任意基本牌」 */
@@ -105,8 +105,8 @@
       return null;
     },
 
-    /** 矢北：本回合第 1 / 第 2 次受到伤害后 */
-    async onDamaged(game, player, count) {
+    /** 矢北：本回合第 1 次受伤回 1 血，此后每次受伤都失去 1 点体力（无次数上限） */
+    async onDamaged(game, player, count, info) {
       if (count === 1) {
         if (player.hp >= player.maxHp) {
           if (SGS.log) SGS.log(player.name + ' 发动【矢北】，但体力已满，无需回复。', 'sys');
@@ -125,15 +125,21 @@
         }
         game.ui.render(game);
         await SGS.sleep(220);
-      } else if (count === 2) {
-        player.hp -= 1;
-        if (SGS.log) {
-          SGS.log(player.name + ' 发动【矢北】：本回合第二次受到伤害，失去 1 点体力，至 ' +
-            Math.max(0, player.hp) + '/' + player.maxHp + '。', 'dmg');
-        }
-        game.ui.render(game);
-        await SGS.sleep(220);
+        return;
       }
+      // ★ 此后每一次（第 2、3、4… 次）都再失去 1 点体力，不再只算第二次
+      player.hp -= 1;
+      // 直接失血使 X 变大 → 复查【伤逝】的「手牌数 < X」条件
+      if (typeof game.checkHandBelowX === 'function') {
+        await game.checkHandBelowX(player);
+      }
+      if (SGS.log) {
+        SGS.log(player.name + ' 发动【矢北】：本回合第 ' + count +
+          ' 次受到伤害，失去 1 点体力，至 ' +
+          Math.max(0, player.hp) + '/' + player.maxHp + '。', 'dmg');
+      }
+      game.ui.render(game);
+      await SGS.sleep(220);
     },
 
     // 渐营不改变出杀次数

@@ -354,6 +354,7 @@
       // 回合内状态：客机的按钮置灰 / 技能栏要靠这些字段
       shaUsed: p.shaUsed || 0, jiuUsed: !!p.jiuUsed,
       jianyingUsed: !!p.jianyingUsed,
+      jianmieUsed: !!p.jianmieUsed,
       trickUsedThisTurn: !!p.trickUsedThisTurn,
       // ★ 涅槃等局中获得的技能 / 已用掉的一次性技能：客机按钮与技能栏要同步
       skills: (p.acquiredSkills || []).slice(),
@@ -433,6 +434,7 @@
       p.chained = !!d.chained;
       p.shaUsed = d.shaUsed || 0; p.jiuUsed = !!d.jiuUsed;
       p.jianyingUsed = !!d.jianyingUsed;
+      p.jianmieUsed = !!d.jianmieUsed;
       p.trickUsedThisTurn = !!d.trickUsedThisTurn;
       // 重建本玩家的技能视图：char.skill 不共享，避免污染另一个座位
       p.acquiredSkills = [];
