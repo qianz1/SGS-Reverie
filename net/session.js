@@ -379,6 +379,9 @@
       this.remoteUI.attach(this, game, this.remoteSeat);
       ui.bindGame(game);
       ui.vsAI = false;
+      // ★ 联机标识（主机侧）：顶栏的「AI 托管」只适用于单机，联机里一律隐藏
+      //   —— 主机的操作要和客机对称，不能让本地 AI 替真人把回合打完。
+      ui._netHost = true;
       const self = this;
       // ★ 每次状态渲染都推一次按座位裁剪的快照（合并 24ms 内的连续 render）
       ui.onRender = () => self.pushSnapshot();

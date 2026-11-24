@@ -101,6 +101,18 @@
   <!-- 顶栏：轮次 / 牌堆 / 重开（当前阶段不再展示） -->
   <header class="topbar">
     <div class="status">
+      <!-- ★ 左侧：玩家侧选项（不参与牌局数据，只是本地开关）
+           AI 托管：默认关闭；技能自动摸牌：仅沮授 / 张春华显示，默认勾选 -->
+      <div class="status-left" id="status-left">
+        <label class="opt-check" id="opt-takeover-wrap"
+               title="勾选后由 AI 接管你的出牌 / 弃牌 / 响应等所有决策（默认关闭）">
+          <input type="checkbox" id="opt-takeover"><span>AI 托管</span>
+        </label>
+        <label class="opt-check hidden" id="opt-skill-wrap"
+               title="勾选：技能达成条件时自动摸牌；取消：询问是否发动">
+          <input type="checkbox" id="opt-skill-auto" checked><span id="opt-skill-label">自动摸牌</span>
+        </label>
+      </div>
       <!-- ★ 不再写死任何角色/牌堆：联机等候期由 #wait-screen 盖住，
            开局后由 ui.render() 填真实值。整副牌共 160 张。 -->
       <span id="round-info"></span>

@@ -163,6 +163,32 @@ body input, body textarea, body [contenteditable="true"] {
   border-left: 1px solid var(--line);
 }
 
+/* ---- 顶栏左侧：玩家侧开关（AI 托管 / 技能自动摸牌） ----
+   .status 是 flex-end 右对齐，这里用 margin-right:auto 单独占住左端。 */
+.status-left {
+  margin-right: auto;
+  display: flex; align-items: center;
+  gap: clamp(8px, 1.4vw, 16px);
+  min-width: 0;
+}
+.opt-check {
+  display: inline-flex; align-items: center; gap: 4px;
+  cursor: pointer; user-select: none;
+  color: var(--muted);
+  font-size: inherit;
+  line-height: 1;
+  white-space: nowrap;
+}
+.opt-check input {
+  margin: 0;
+  width: clamp(10px, 1.5vh, 13px);
+  height: clamp(10px, 1.5vh, 13px);
+  accent-color: var(--gold);
+  cursor: pointer;
+}
+.opt-check:hover { color: var(--gold); }
+.opt-check.hidden { display: none; }
+
 /* ================= 武将卡（角色框） ================= */
 .hero-card {
   /* ── 竖排名字的区间参数（ui.render 会写入 --name-scale / --hp-pips）──

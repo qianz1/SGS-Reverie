@@ -303,6 +303,9 @@
       $('btn-restart').addEventListener('click', () => location.reload());
       $('btn-again').addEventListener('click', () => location.reload());
 
+      // 顶栏玩家侧开关（AI 托管 / 技能自动摸牌）
+      this.initOptions();
+
       // 玩家手牌区用事件委托，避免每次 render 重复解绑
       $('me-hand').addEventListener('click', (e) => {
         const el = e.target.closest('.card');
@@ -702,6 +705,142 @@
 
     bindGame(game) {
       this.game = game;
+      // ★ 每局回到默认值：AI 托管关闭、【伤逝/渐营】自动摸牌勾选。
+      //   放在 bindGame（新开一局的唯一入口）里重置，避免上一局的勾选残留。
+      if (SGS.Options) {
+        SGS.Options.autoTakeover = false;
+        SGS.Options.skillAuto = {};
+      }
+      const ai = $('opt-takeover');
+      if (ai) ai.checked = false;
+      this._optSig = '';
+      this.syncOptions(game);
+    }
+
+    /* ---------------- 顶栏玩家侧开关 ---------------- */
+
+    /**
+     * 绑定顶栏两个勾选框（只绑一次，状态存 SGS.Options）。
+     *  · AI 托管：默认关闭。勾选后 SGS.isDecider 对本地真人返回 false，
+     *    所有决策自动走 AI；正在等待的出牌 / 弃牌操作会被立即释放。
+     *  · 技能自动摸牌：默认勾选。取消后【伤逝】/【渐营】到点询问是否发动。
+     */
+    /**
+     * ★ 决策前先把排队中的「手牌数 < X」复查（可能弹【伤逝】询问）结算完。
+     * 那些复查是 removeCard 之后在微任务里跑的、与调用方并行；如果它先弹了
+     * 询问面板、调用方随后又设了新的 pending，两者会互相覆盖（询问 Promise
+     * 永远悬着 → 后续复查全被堵住）。所有会设置 pending 的等待入口都先
+     * await 一次它，保证面板串行。waitOptional 自己不能调用（会自锁）。
+     */
+    settleBeforeAsk(game) {
+      // 返回 null = 没有要等的复查 → 调用方保持「同步设置 pending」的原语义
+      // （联机 onAsk 会在调用后立刻读 ui.pending，延迟一拍就会当成放弃）。
+      if (game && typeof game.handBelowXPending === 'function' && game.handBelowXPending()) {
+        try {
+          return Promise.resolve(game.handBelowXSettled()).then(
+            () => undefined, () => undefined);
+        } catch (e) { /* 忽略 */ }
+      }
+      return null;
+    }
+
+    initOptions() {
+      const ai = $('opt-takeover');
+      if (ai && ai.addEventListener) {
+        ai.checked = !!(SGS.Options && SGS.Options.autoTakeover);
+        ai.addEventListener('change', () => {
+          if (SGS.Options) SGS.Options.autoTakeover = !!ai.checked;
+          if (ai.checked) this.releasePendingToAI();
+        });
+      }
+      const sk = $('opt-skill-auto');
+      if (sk && sk.addEventListener) {
+        sk.addEventListener('change', () => {
+          const name = this._autoSkillName;
+          if (!name || !SGS.Options) return;
+          if (!SGS.Options.skillAuto) SGS.Options.skillAuto = {};
+          SGS.Options.skillAuto[name] = !!sk.checked;
+        });
+      }
+    }
+
+    /** 当前真人角色是否带「自动摸牌」类技能 → 返回技能名（无则空串） */
+    autoSkillNameOf(player) {
+      const titles = String((player && player.skill && player.skill.titles) || '');
+      if (titles.indexOf('伤逝') >= 0) return '伤逝';
+      if (titles.indexOf('渐营') >= 0) return '渐营';
+      return '';
+    }
+
+    /**
+     * 同步顶栏勾选框的显隐与勾选态。
+     *  · 联机一律隐藏 AI 托管：主机（_netHost）、客机（_netView）都不显示。
+     *    客机是「操作要上送权威端」，本地静默跳过会让主机收到 null 动作；
+     *    主机则是要与客机对称，不能让本地 AI 替真人把整回合打完。
+     *  · 技能勾选只在真人角色带【伤逝】/【渐营】时显示。
+     * 每次 render 都会调用，用 _optSig 做无变化短路，避免频繁改 DOM。
+     */
+    syncOptions(game) {
+      const human = game && game.human;
+      const name = this.autoSkillNameOf(human);
+      // ★ AI 托管只给单机：主机（_netHost）/ 客机（_netView）一律隐藏。
+      //   联机是两台机器各操作各的角色，本地 AI 替真人打完会让对手干等。
+      const netPlay = !!(this._netHost || this._netView);
+      const sig = [netPlay, name,
+        !!(SGS.Options && SGS.Options.autoTakeover),
+        name ? SGS.skillAutoEnabled(name) : ''].join('|');
+      if (sig === this._optSig) return;
+      this._optSig = sig;
+      this._autoSkillName = name;
+
+      const takeoverWrap = $('opt-takeover-wrap');
+      if (takeoverWrap && takeoverWrap.classList) {
+        takeoverWrap.classList.toggle('hidden', netPlay);
+      }
+      const skillWrap = $('opt-skill-wrap');
+      const skillLabel = $('opt-skill-label');
+      const skillBox = $('opt-skill-auto');
+      if (skillWrap && skillWrap.classList) {
+        skillWrap.classList.toggle('hidden', !name);
+      }
+      if (name) {
+        if (skillLabel) skillLabel.textContent = name + '自动摸牌';
+        if (skillWrap && skillWrap.setAttribute) {
+          skillWrap.setAttribute('title',
+            '勾选：达成条件时自动摸牌；取消：询问是否发动【' + name + '】');
+        }
+        if (skillBox) skillBox.checked = SGS.skillAutoEnabled(name);
+      }
+    }
+
+    /**
+     * 勾上 AI 托管时，把「正在等玩家操作」的长流程立刻交给 AI：
+     *  · play    → resolve {type:'auto'}，Game.phasePlay 收到后直接 ai.playPhase
+     *  · discard → 用 ai.pickDiscards 选好牌替玩家弃
+     * 其余模式（响应闪 / 濒死自救 / 选择目标…）都是一次性短询问，
+     * 让玩家自己点完这一次，AI 从下一个决策点接管 —— 半路强行 resolve(null)
+     * 会变成「托管后白送闪避 / 见死不救」。
+     */
+    releasePendingToAI() {
+      const pd = this.pending;
+      if (!pd || typeof pd.resolve !== 'function') return false;
+      let value = null;
+      if (pd.mode === 'play') {
+        value = { type: 'auto' };
+      } else if (pd.mode === 'discard') {
+        const hand = (pd.player && pd.player.hand) || [];
+        const need = Math.max(1, Math.min(pd.need || 1, hand.length));
+        value = (this.game && this.game.ai &&
+          typeof this.game.ai.pickDiscards === 'function')
+          ? this.game.ai.pickDiscards(pd.player, need) : null;
+      } else {
+        return false;
+      }
+      this.pending = null;
+      try { pd.resolve(value); } catch (e) { /* 已结算 */ }
+      this.refreshActions();
+      if (this.game) this.render(this.game);
+      return true;
     }
 
     /* ---------------- 开局选将 ---------------- */
@@ -1915,6 +2054,8 @@
       // 当前行动方描边
       $('ai-area').classList.toggle('acting', game.actor === ai);
       $('me-area').classList.toggle('acting', game.actor === me);
+      // 顶栏开关显隐（角色确定 / 联机视角变化后才会真正改 DOM）
+      this.syncOptions(game);
     }
 
     /* ---------------- 中央展示区（最多 5 张，死亡弃置不受上限） ---------------- */
@@ -4109,6 +4250,20 @@
      *   {type:'end'}                                       结束出牌
      */
     waitPlay(player, game) {
+      // ★ AI 托管：直接回 auto 信号，由 Game.phasePlay 交给 AI 处理。
+      //   正常流程在 isDecider 处就分流了，这里只兜底「切换开关时已经不是
+      //   玩家回合决策点」的情况（例如渲染后立刻被重新调用）。
+      //   客机（_netView）不适用：它的动作要上送权威端，不能本地静默跳过。
+      if (!this._netView && !this._netHost &&
+          SGS.Options && SGS.Options.autoTakeover &&
+          player && player.isHuman && !player.isRemote) {
+        return Promise.resolve({ type: 'auto' });
+      }
+      const wait = this.settleBeforeAsk(game);
+      return wait ? wait.then(() => this._waitPlay(player, game))
+        : this._waitPlay(player, game);
+    }
+    _waitPlay(player, game) {
       return new Promise((resolve) => {
         this.pending = { mode: 'play', player, game, resolve, selected: null };
         const zb = (SGS.Equipment && SGS.Equipment.hasZhangba(player) &&
@@ -4132,6 +4287,10 @@
      *   {card, viaSkill:true, conversion, scene:'respond'}  技能按钮转化的 need 牌
      */
     waitRespond(player, game, opts) {
+      const wait = this.settleBeforeAsk(game);
+      return wait ? wait.then(() => this._waitRespond(player, game, opts)) : this._waitRespond(player, game, opts);
+    }
+    _waitRespond(player, game, opts) {
       opts = opts || {};
       const need = opts.need || 'shan';
       const reason = opts.reason || '杀';
@@ -4154,6 +4313,10 @@
      *   置灰 + 点击拦截两处都要做，保证这一次弃牌一定能把有效张数降到上限。
      */
     waitDiscard(player, need, game, opts) {
+      const wait = this.settleBeforeAsk(game);
+      return wait ? wait.then(() => this._waitDiscard(player, need, game, opts)) : this._waitDiscard(player, need, game, opts);
+    }
+    _waitDiscard(player, need, game, opts) {
       opts = opts || {};
       const skip = typeof opts.skip === 'function' ? opts.skip : null;
       const pool = (player && player.hand)
@@ -4186,6 +4349,10 @@
      *   技能按钮才能选 —— 与其它场景「主动技必须点按钮」的口径一致。
      */
     waitPick(player, game, opts) {
+      const wait = this.settleBeforeAsk(game);
+      return wait ? wait.then(() => this._waitPick(player, game, opts)) : this._waitPick(player, game, opts);
+    }
+    _waitPick(player, game, opts) {
       opts = opts || {};
       const need = opts.need || 1;
       return new Promise((resolve) => {
@@ -4219,6 +4386,10 @@
      * 1 点以上），或 null 放弃。【酒】在此处次数不限。
      */
     waitBrink(player, saves, game) {
+      const wait = this.settleBeforeAsk(game);
+      return wait ? wait.then(() => this._waitBrink(player, saves, game)) : this._waitBrink(player, saves, game);
+    }
+    _waitBrink(player, saves, game) {
       const list = Array.isArray(saves) ? saves : (saves ? [saves] : []);
       return new Promise((resolve) => {
         // ★ selected 记录玩家点选的那一张【桃】/【酒】；确认前不自动使用。
@@ -4483,6 +4654,10 @@
      * opts.choices = [{label, value}]，返回被点选项的 value。
      */
     waitChoice(player, game, opts) {
+      const wait = this.settleBeforeAsk(game);
+      return wait ? wait.then(() => this._waitChoice(player, game, opts)) : this._waitChoice(player, game, opts);
+    }
+    _waitChoice(player, game, opts) {
       opts = opts || {};
       const choices = (opts.choices || []).slice();
       return new Promise((resolve) => {

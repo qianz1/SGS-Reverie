@@ -28,13 +28,37 @@
   };
 
   /**
+   * ★ 玩家侧可选项（顶栏勾选，仅本地对局生效，每局开始时由 UI 重置为默认）：
+   *   autoTakeover —— AI 托管：勾选后自己的所有决策交给 AI 处理
+   *   skillAuto    —— 技能名 → 是否「触发时自动发动」。缺省视为 true；
+   *                   显式设为 false 时，到点改为询问「是否发动【X】」。
+   *   放在全局而不是 Game 实例上：SGS.isDecider 是纯函数（部分专项把它
+   *   单独绑到普通对象上跑，没有 Game 实例可用），必须能读到同一份开关。
+   */
+  SGS.Options = SGS.Options || { autoTakeover: false, skillAuto: {} };
+
+  /** 该技能是否处于「自动发动」状态（未设置过 = 自动，与旧行为一致） */
+  SGS.skillAutoEnabled = function (name) {
+    const map = SGS.Options && SGS.Options.skillAuto;
+    return !map || map[name] !== false;
+  };
+
+  /**
    * ★ 这个座位的决策要不要「问人」：本地真人 / 远端联机玩家都要挂起
    *   Promise 等输入，只有纯 AI 才自动决策。
    *   写成全局纯函数而不是只挂 Game.prototype：部分专项会把 Game 的方法
    *   单独绑到普通对象上跑，那里没有 Game 实例方法可用。
+   *
+   *   ★ AI 托管：本地真人勾选托管后视同纯 AI（isDecider = false），
+   *   所有 `if (SGS.isDecider(...)) → 问人 / else → AI 决策` 的分支会
+   *   自动改走 AI。远端玩家（isRemote）不受本地开关影响 —— 托管只接管
+   *   自己这一台机器的操作。
    */
   SGS.isDecider = function (player) {
-    return !!(player && (player.isHuman || player.isRemote));
+    if (!player) return false;
+    if (SGS.Options && SGS.Options.autoTakeover &&
+        player.isHuman && !player.isRemote) return false;
+    return !!(player.isHuman || player.isRemote);
   };
 
   /** 默认洗牌入口：保持原有签名与行为（Math.random） */

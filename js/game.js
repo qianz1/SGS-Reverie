@@ -491,7 +491,9 @@
         const q = this._handBelowXPending;
         if (!q || !q.length) return;
         const p = q.shift();
-        await this.checkHandBelowX(p);
+        // deferred：手牌离手后的延后复查。濒死自救期间（hp<=0）不在这里
+        // 弹「是否发动」，否则会和自救面板抢同一个 pending。
+        await this.checkHandBelowX(p, { deferred: true });
       }
     }
 
@@ -500,19 +502,33 @@
       return this._handBelowXFlush || Promise.resolve();
     }
 
+    /** 是否有排队中的「手牌数 < X」复查（可能正在弹【伤逝】询问） */
+    handBelowXPending() {
+      return !!(this._handBelowXFlush ||
+        (this._handBelowXPending && this._handBelowXPending.length));
+    }
+
     /**
-     * ★【伤逝】统一检查入口：X = 已损失体力值，手牌数小于 X 后摸至 X 张。
+     * ★【伤逝】统一检查入口：X = 已损失体力值（最高 = 体力上限），手牌数
+     * 小于 X 后摸至 X 张。
      * 触发条件只看「手牌数 < X」，与是否失去体力无关；调用方有三处：
      *   · queueHandBelowX —— 任何手牌离手（Player.removeCard 统一收口，延后结算）
      *   · Game.damage / 矢北直接失血 —— X 因体力流失而变大（当场 await，
      *     摸到的【桃】要赶在濒死结算之前到手）
+     *   · 体力降到 0 / 负数时同样复查（X 取到上限），在进入濒死之前补牌
      * 摸牌走常规 drawCards（含飞牌动画）；调用前已判条件，不会重复摸。
      */
-    async checkHandBelowX(player) {
-      if (!player || (typeof player.isDead === 'function' && player.isDead())) return;
+    async checkHandBelowX(player, opts) {
+      // ★ 只排除「已经阵亡结算完」的角色，不能用 isDead()（它等价于 hp<=0）：
+      //   体力刚被打到 0 时正处于「濒死之前」的窗口，【伤逝】必须在这里
+      //   触发（X 取到体力上限），摸到的【桃】才能用于自救。真正阵亡后
+      //   onDeath 会打上 player.dead 标记，那时不再补牌。
+      if (!player || player.dead) return;
       const hook = player.skill && player.skill.onHandBelowX;
       if (typeof hook !== 'function') return;
-      await hook(player, this);
+      // opts.deferred —— 由 queueHandBelowX 的延后 flush 传入：那一段可能
+      // 正好落在濒死自救循环里，技能询问要避开（详见角色钩子里的判定）。
+      await hook(player, this, opts || {});
     }
 
     /**
@@ -551,7 +567,7 @@
      *
      * 只在「自己的出牌阶段」生效：响应、打出、弃置、濒死使用都不计入。
      * 回调角色 skill.onPlayCard(game, player, current, previous)；
-     * 【渐营】在其中判断同花色/点数并**直接摸牌，不询问**。
+     * 【渐营】在其中判断同花色/点数并摸牌（默认自动，顶栏可改为询问）。
      */
     async noteUsedCard(p, card, opts) {
       if (!p || !card || this.phase !== 'play' || this.actor !== p) return;
@@ -828,7 +844,22 @@
       if (SGS.isDecider(p)) {
         // 玩家可反复出牌，直到主动结束出牌
         for (;;) {
+          // ★ AI 托管：每轮决策前复查开关。勾上托管的那一刻，UI 会把正在
+          //   等待的出牌操作 resolve 成 {type:'auto'}，这里立刻交给 AI 接管，
+          //   不必等玩家先点一下「结束出牌」。
+          if (SGS.Options && SGS.Options.autoTakeover &&
+              p.isHuman && !p.isRemote) {
+            if (SGS.log) SGS.log(p.name + '【AI 托管】由 AI 接管本回合出牌。', 'sys');
+            await this.ai.playPhase(p);
+            if (SGS.log) SGS.log(p.name + '【出牌阶段】结束。');
+            return;
+          }
           const act = await this.ui.waitPlay(p, this);
+          if (act.type === 'auto') {          // 托管信号（见上）
+            await this.ai.playPhase(p);
+            if (SGS.log) SGS.log(p.name + '【出牌阶段】结束。');
+            return;
+          }
           if (act.type === 'end') {
             if (SGS.log) SGS.log(p.name + '【出牌阶段】结束。');
             return;
@@ -839,6 +870,12 @@
           this.ui.render(this);
         }
       } else {
+        // 托管中的本地真人也走这里（isDecider 已返回 false）：写一条说明，
+        // 免得玩家以为「AI 托管」没生效、或者以为自己的操作被吞了。
+        if (SGS.Options && SGS.Options.autoTakeover &&
+            p.isHuman && !p.isRemote && SGS.log) {
+          SGS.log(p.name + '【AI 托管】由 AI 接管本回合出牌。', 'sys');
+        }
         await this.ai.playPhase(p);
         if (SGS.log) SGS.log(p.name + '【出牌阶段】结束。');
       }
@@ -2551,8 +2588,10 @@
         this.ui.shakeHero(target, total, dmgType);
       }
       // ★【伤逝】复查「手牌数 < X」：扣血当刻 X 变大，可能让手牌数跌破 X。
-      //   仍在濒死之前，摸到的【桃】可立刻用于自救。
-      await this.checkHandBelowX(target);
+      //   ★ 这是「进入濒死之前」的最后窗口：即使体力已经被打到 0 / 负数，
+      //     也在这里（direct，非 deferred）询问 / 摸牌，问完再往下走 brink()。
+      //     所以 1 血 2 牌受 1 点伤害 → 先摸到 3 张，再进入濒死自救。
+      await this.checkHandBelowX(target, { direct: true });
 
       this.ui.render(this);
       await SGS.sleep(320);
@@ -2754,6 +2793,11 @@
         SGS.log(p.name + ' 弃置 ' + cards.length + ' 张：' +
           (cards.map((c) => c.name).join('、') || '无') + '。');
       }
+      // ★ 弃牌会让手牌跌破 X，可能触发【伤逝】询问：等它结算完再结束弃牌阶段，
+      //   否则回合已经往下走、询问面板还挂着，答案回来时牌局已经换了阶段。
+      if (typeof this.handBelowXSettled === 'function') {
+        await this.handBelowXSettled();
+      }
       this.ui.render(this);
     }
 
@@ -2768,6 +2812,10 @@
      * 展示区只给一条「XX阵亡弃置」描述，不逐张飞牌；之后才结算胜负。
      */
     async onDeath(player) {
+      // ★ 打上「已阵亡」标记：isDead() 只等价于 hp<=0（濒死阶段也算），
+      //   但【伤逝】这类「手牌数小于 X」的复查必须区分「濒死前」与「真死」，
+      //   否则阵亡弃置后还会再摸牌。
+      player.dead = true;
       // ★ 阵亡语音：只在这里触发（濒死被桃/酒救回不会走到本方法）。
       //   假 UI（headless 自测）没有 playDeathVoice 时静默跳过。
       if (this.ui && typeof this.ui.playDeathVoice === 'function') {

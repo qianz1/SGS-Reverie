@@ -7,10 +7,17 @@
  *     · damageAsLoss()=true：Game.damage() 在扣血前询问来源，命中后不走
  *       藤甲 / 白银狮子修正，不触发 onDamaged（矢北等「受到伤害后」），
  *       也不做属性伤害的铁索传导；但伤害音效 / 受击特效 / 濒死阵亡照常。
- *   伤逝（自动，不询问）
- *     · onHandBelowX() 钩子：X = 已损失体力值，手牌 < X 时补摸到 X 张。
+ *   伤逝（自动 / 顶栏可改为询问）
+ *     · onHandBelowX() 钩子：X = 已损失体力值（最高等于体力上限），
+ *       手牌 < X 时补摸到 X 张。
+ *       ★ 体力降到 0 / 负数、进入濒死之前也会复查一次（X 取到体力上限），
+ *         摸到的【桃】可以赶在濒死自救时到手；实际体力仍保持负数。
  *       手牌离手（removeCard 收口，Game 排队后结算）与体力流失使 X 变大
  *       （damage / 矢北）都会复查同一条件，与事件类型无关。
+ *       ★ 顶栏取消勾选「伤逝自动摸牌」后改为询问是否发动：伤害 / 矢北这类
+ *         「扣血后、进濒死前」的直接复查在体力 0 / 负数时也照常询问，
+ *         问完才继续进入濒死；只有濒死自救过程中（手牌离手的延后复查）
+ *         不询问、直接按发动处理，避免和自救面板抢同一个 pending。
  *   翦灭（出牌阶段限一次，主动技按钮）
  *     · actions[0]（once:false）+ usable 检查 player.jianmieUsed。
  *       选一名其他角色 → 双方各选一种颜色（AI 按自己手牌颜色数量独立选，
@@ -83,7 +90,7 @@
     name: '绝情',
     titles: '绝情 · 伤逝 · 翦灭',
     desc: '绝情（锁定技）：你即将造成的伤害视为失去体力。｜' +
-          '伤逝：当你的手牌数小于X后，你可以将手牌摸至X张。｜' +
+          '伤逝：当你的手牌数小于X后，你可以将手牌摸至X张（X为你已损失体力值）。｜' +
           '翦灭：出牌阶段限一次，你可与一名其他角色同时选择一种颜色，你与其弃置各自选择颜色的手牌，然后弃置牌较多的角色视为对另一名角色使用一张【决斗】。',
     active: true,
 
@@ -100,10 +107,35 @@
      *   落地后再补一次 render 反而是「立刻执行」时代留下的多余动作
      *   （飞牌期间那次重绘会让落点位置冒出真牌）。动画与普通摸牌完全同款。
      */
-    async onHandBelowX(player, game) {
-      const X = Math.max(0, (player.maxHp || 3) - player.hp);
+    async onHandBelowX(player, game, opts) {
+      // ★ X = 已损失体力值 = 体力上限 - 当前体力，但**最大不超过体力上限**：
+      //   体力被打到 0 或负数时按 0 计（1 体力吃【酒】+【杀】2 点 → -1，
+      //   X 仍是 3 而不是 4）。实际体力照旧是负数，脱离濒死仍要回复到 1。
+      const maxHp = player.maxHp || 3;
+      const X = Math.max(0, maxHp - Math.max(0, player.hp));
       if (!X || ((player.hand || []).length >= X)) return;
       if (typeof game.drawCards !== 'function') return;
+      // ★ 取消顶栏「伤逝自动摸牌」后，改为询问是否发动。
+      //   · 伤害 / 矢北的调用是 direct（体力已扣、还没进濒死），此时 hp<=0
+      //     也照常询问 —— 问完才继续往下走 brink()，不会和自救面板抢。
+      //   · queueHandBelowX 的延后复查是 deferred：它可能正好落在濒死自救
+      //     循环里（用桃后手牌离手），那时不弹询问、直接按发动处理。
+      //   · 已有别的面板在等输入时也不问（避免互相覆盖）。
+      const deferred = !!(opts && opts.deferred);
+      if (!SGS.skillAutoEnabled('伤逝') && SGS.isDecider(player)) {
+        const uiBusy = !!(game.ui && game.ui.pending);
+        if (!uiBusy && (!deferred || player.hp > 0)) {
+          const ok = await game.askOptional(player, {
+            name: '伤逝', context: 'shangshi',
+            desc: '【伤逝】：你的手牌数小于 ' + X + '，是否将手牌摸至 ' + X + ' 张？',
+            yes: '发动', no: '不发动'
+          });
+          if (!ok) {
+            if (SGS.log) SGS.log(player.name + ' 放弃发动【伤逝】。', 'sys');
+            return;
+          }
+        }
+      }
       const need = X - (player.hand || []).length;
       await game.drawCards(player, need);
       if (SGS.log) {

@@ -5,8 +5,9 @@
  * 技能契约（角色文件内聚实现，主循环 / UI / AI 只认统一钩子）：
  *   渐营（含「可以」，主动转化走右下技能按钮）
  *     ① 出牌阶段每使用一张牌，若与此阶段「上一张使用的牌」花色或点数相同，
- *        **直接摸一张牌、不询问**：Game.noteUsedCard() 把 current / previous
- *        交给 onPlayCard()，这里判断后调用 Game.drawCards()（同款摸牌动画）。
+ *        摸一张牌：Game.noteUsedCard() 把 current / previous 交给
+ *        onPlayCard()，这里判断后调用 Game.drawCards()（同款摸牌动画）。
+ *        ★ 默认自动发动；顶栏取消「渐营自动摸牌」后改为询问是否发动。
  *     ② 出牌阶段限一次，可将一张牌当「任意一张基本牌」使用：
  *        六种基本牌 = 杀 / 闪 / 桃 / 酒 / 火杀 / 雷杀（Cards.BASIC_TYPES）。
  *        ★ 描述写「牌」= 手牌 + 装备区（不含判定区），技能选牌模式下
@@ -73,7 +74,9 @@
     },
 
     /**
-     * ① 渐营摸牌：与上一张使用的牌同花色或同点数 → 直接摸一张，不询问。
+     * ① 渐营摸牌：与上一张使用的牌同花色或同点数 → 摸一张牌。
+     * 默认自动发动（不询问，与旧行为一致）；顶栏取消「渐营自动摸牌」后，
+     * 到点改为询问是否发动（只问真人；AI / 托管由 ai.askOptional 决策）。
      * current / previous 都是 {card, suit, rank, asType}，花色已按「视为」规则覆盖。
      */
     async onPlayCard(game, player, current, previous) {
@@ -83,10 +86,25 @@
       const sameRank = !!current.rank && !!previous.rank &&
         String(current.rank) === String(previous.rank);
       if (!sameSuit && !sameRank) return;
+      const reason = sameSuit
+        ? '花色相同（' + current.suit + '）' : '点数相同（' + current.rank + '）';
+      if (!SGS.skillAutoEnabled('渐营') && SGS.isDecider(player)) {
+        const uiBusy = !!(game.ui && game.ui.pending);
+        if (!uiBusy) {
+          const ok = await game.askOptional(player, {
+            name: '渐营', context: 'jianying',
+            desc: '【渐营】：本张与上一张使用的牌' + reason + '，是否摸一张牌？',
+            yes: '发动', no: '不发动'
+          });
+          if (!ok) {
+            if (SGS.log) SGS.log(player.name + ' 放弃发动【渐营】。', 'sys');
+            return;
+          }
+        }
+      }
       if (SGS.log) {
         SGS.log(player.name + ' 发动【渐营】：本张与上一张使用的牌' +
-          (sameSuit ? '花色相同（' + current.suit + '）' : '点数相同（' + current.rank + '）') +
-          '，摸一张牌。', 'sys');
+          reason + '，摸一张牌。', 'sys');
       }
       const got = await game.drawCards(player, 1);
       if (SGS.log) SGS.log(player.name + '【渐营】摸了 ' + got.length + ' 张牌。', 'sys');
