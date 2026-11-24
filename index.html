@@ -101,8 +101,10 @@
   <!-- 顶栏：轮次 / 牌堆 / 重开（当前阶段不再展示） -->
   <header class="topbar">
     <div class="status">
-      <span id="round-info">第 1 轮</span>
-      <span id="deck-info">牌堆 78 张</span>
+      <!-- ★ 不再写死任何角色/牌堆：联机等候期由 #wait-screen 盖住，
+           开局后由 ui.render() 填真实值。整副牌共 160 张。 -->
+      <span id="round-info"></span>
+      <span id="deck-info">牌堆 160 张</span>
       <button id="btn-restart" class="btn tiny">重开</button>
       <span class="brand-mini">三国杀-狂想</span>
     </div>
@@ -111,11 +113,11 @@
   <!-- 敌方武将卡：顶部居中；右上角「敌」，左下角只显示手牌张数数字 -->
   <section id="ai-area" class="hero-card foe" data-player="ai">
     <img class="hero-art" id="ai-art" alt="">
-    <div class="hero-faction" id="ai-faction">蜀</div>
+    <div class="hero-faction" id="ai-faction"></div>
     <div class="hero-q">敌</div>
-    <div class="hero-name" id="ai-name">赵云</div>
+    <div class="hero-name" id="ai-name"></div>
     <div class="hero-hp" id="ai-hp"></div>
-    <div class="hero-hand-count" id="ai-count">0</div>
+    <div class="hero-hand-count" id="ai-count"></div>
     <!-- 铁索连环：处于连环状态时显示的横向锁链 -->
     <div class="chain-mark hidden" id="ai-chain"></div>
     <!-- 其他角色的判定区：延时锦囊图标贴在角色框下侧边框上，由 ui.js 渲染 -->
@@ -153,9 +155,9 @@
   <!-- 玩家武将卡：右下角金框，右上角「主」 -->
   <section id="me-area" class="hero-card self" data-player="me">
     <img class="hero-art" id="me-art" alt="">
-    <div class="hero-faction" id="me-faction">蜀</div>
+    <div class="hero-faction" id="me-faction"></div>
     <div class="hero-q">主</div>
-    <div class="hero-name" id="me-name">张飞</div>
+    <div class="hero-name" id="me-name"></div>
     <div class="hero-hp" id="me-hp"></div>
     <!-- 铁索连环：处于连环状态时显示的横向锁链 -->
     <div class="chain-mark hidden" id="me-chain"></div>
@@ -266,6 +268,7 @@
 <script src="js/characters/shenzhaoyun.js"></script>
 <script src="js/characters/jushou.js"></script>
 <script src="js/characters/wolongzhuge.js"></script>
+<script src="js/characters/pangtong.js"></script>
 <script src="js/player.js"></script>
 <script src="js/ai.js"></script>
 <script src="js/ui.js"></script>
