@@ -441,7 +441,15 @@
     async presentCards(cards, fromPlayer, opts) {
       cards = (cards || []).filter(Boolean);
       if (!cards.length) return;
-      if (this.ui && typeof this.ui.flyCards === 'function') {
+      // ★ 来源可能混合：手牌 + 装备区（【三陈】这类「弃置三张牌」）。批量
+      //   飞牌只支持同一来源，于是逐张走 presentCard —— 它会给装备区的牌
+      //   自动补 from:'equip' + slot，从对应装备槽起飞而不是手牌区。
+      const mixed = cards.some((c) => {
+        if (!fromPlayer || !SGS.Zones || typeof SGS.Zones.find !== 'function') return false;
+        const ze = SGS.Zones.find(fromPlayer, c.id);
+        return !!(ze && ze.zone === 'equip');
+      });
+      if (!mixed && this.ui && typeof this.ui.flyCards === 'function') {
         await this.ui.flyCards(cards, fromPlayer, opts || {});
         return;
       }
@@ -607,14 +615,16 @@
       const a = this.aiPlayer;
       if (SGS.log) {
         // ★ 座次随机后必须让玩家看清谁是一号位、为什么是对手先动。
+        //   ★ 一律只写角色名：联机两端看到的是同一份记录，任何「你 / 对方 /
+        //     AI」都会在另一半屏幕上变成错的（客机看到的「你」其实是主机）。
         if (this.mode && this.players.length) {
           const seats = this.players.map((p) =>
-            SGS.seatLabel(p.seat) + '号位 ' + p.name +
-            (p.isHuman ? '（你）' : (p.isRemote ? '（对手）' : '（AI）'))).join('，');
+            SGS.seatLabel(p.seat) + '号位 ' + p.name).join('，');
           SGS.log('本局座次：' + seats + '；' + this.actor.name + ' 先手。', 'turn');
         }
         SGS.log(
-          '对局开始：你【' + h.name + '·' + h.skill.name + '】 VS AI【' + a.name + '·' + a.skill.name + '】',
+          '对局开始：【' + h.name + '·' + h.skill.name + '】 VS 【' +
+            a.name + '·' + a.skill.name + '】',
           'turn'
         );
         SGS.log('规则：每回合摸 2 张，杀限 1 次（咆哮除外），酒限 1 次，手牌上限 = 当前体力。', 'sys');
@@ -642,6 +652,19 @@
       this.players.forEach((q) => { q.turnDamageCount = 0; q.shibeiHealed = false; });
       if (SGS.log) SGS.log('── 第 ' + this.round + ' 轮 · ' + p.name + ' 的回合 ──', 'turn');
 
+      // ★ 翻面（背面朝上）：回合开始的瞬间先翻回正面，然后直接跳过整个回合
+      //   —— 准备、判定、摸牌、出牌、弃牌、结束一个阶段都不进入。
+      if (p.flipped) {
+        p.flipped = false;
+        if (SGS.log) {
+          SGS.log(p.name + ' 的武将牌背面朝上：先翻回正面，然后跳过本回合。', 'sys');
+        }
+        this.ui.render(this);
+        await SGS.sleep(760);
+        await this.advanceTurn();
+        return;
+      }
+
       for (const ph of SGS.PHASES) {
         this.phase = ph.key;
         this.ui.setPhase(ph.key);
@@ -656,12 +679,16 @@
       if (SGS.log) SGS.log(p.name + ' 回合结束，展示区清空。');
       if (this.ui && typeof this.ui.clearTableCard === 'function') this.ui.clearTableCard();
 
-      // 回合切换：按座次交给下一名角色；回到一号位即进入下一轮。
+      await this.advanceTurn();
+    }
+
+    /** 回合切换：按座次交给下一名角色；回到一号位即进入下一轮。 */
+    advanceTurn() {
       // 1v1 下等价于原来的 1-current，写成取模是为了将来多人局也成立。
       this.current = (this.current + 1) % this.players.length;
       if (this.current === 0) this.round++;
       this.ui.render(this);
-      await SGS.sleep(400);
+      return SGS.sleep(400);
     }
 
     /** 阶段分发 */
@@ -677,7 +704,7 @@
     }
 
     // ① 准备阶段：重置回合内状态
-    phasePrepare(p) {
+    async phasePrepare(p) {
       p.shaUsed = 0;
       p.jiuUsed = false;
       p.jiuBuff = false;
@@ -686,6 +713,10 @@
       p.skipPlay = false;
       if (SGS.log) SGS.log(p.name + '【准备阶段】重置【杀】/【酒】使用次数。');
       this.ui.render(this);
+      // ★ 角色「准备阶段」钩子（觉醒技等）：与 onDamaged 同款——直接以
+      //   (game, player) 调用角色自己的 skill 实现；没实现的角色完全无感。
+      const hook = p.skill && p.skill.onPrepare;
+      if (typeof hook === 'function') await hook(this, p);
     }
 
     /**
@@ -2654,8 +2685,34 @@
      * ★【龙魂】♥ 当【桃】：玩家点技能按钮回传的转化对象在这里归一化，
      *   与真正的【桃】一样回复 1 点体力；牌仍按原花色进弃牌堆。
      */
+    /**
+     * ★「其他角色进入濒死状态时」的救援钩子（【仁心】这类）。
+     *   濒死结算开始时先逐个询问其他角色；有人救起（hp > 0）就立即返回。
+     *   · 用 player.dead（阵亡标记）判断已死，不能用 isDead()——它等价于
+     *     hp <= 0，濒死角色本身就会命中。
+     *   · 每名角色每次濒死只问一次；不发动就继续问下一位。
+     */
+    async askBrinkRescue(target) {
+      if (!target || target.hp > 0 || !this.players) return;
+      for (const p of this.players) {
+        if (target.hp > 0 || this.over) return;
+        if (!p || p === target || p.dead) continue;
+        const hook = p.skill && p.skill.onOtherBrink;
+        if (typeof hook !== 'function') continue;
+        try {
+          await hook(this, p, target);
+        } catch (e) {
+          if (typeof console !== 'undefined' && console.warn) {
+            try { console.warn('[brink] 濒死救援钩子异常', e); } catch (e2) { /* 忽略 */ }
+          }
+        }
+      }
+    }
+
     async brink(target) {
       if (SGS.log) SGS.log(target.name + ' 濒死！', 'dmg');
+      // ★ 先问其他角色（【仁心】等）：救起来就不必进入自救循环。
+      await this.askBrinkRescue(target);
       const passive = (target.skill && typeof target.skill.onBrinkState === 'function')
         ? target.skill.onBrinkState : null;
       if (passive) await passive(this, target, 'enter');
@@ -2850,7 +2907,10 @@
         winner = (this.players || []).find((p) => p && !p.isDead()) || winner;
       }
       const win = !!(winner && winner.isHuman);
-      if (SGS.log) SGS.log(win ? '🎉 你赢了！' : '💀 你输了，AI 获胜。', 'turn');
+      if (SGS.log) {
+        // 同样只写角色名（联机两端共用一份记录）
+        SGS.log('🎉 对局结束：' + ((winner && winner.name) || '无人') + ' 获胜。', 'turn');
+      }
       this.ui.showGameOver(win, this);
     }
   }

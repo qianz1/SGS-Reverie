@@ -115,7 +115,12 @@
     '涅槃': 'NiePan',
     '绝情': 'JueQing',
     '伤逝': 'ShangShi',
-    '翦灭': 'JianMie'
+    '翦灭': 'JianMie',
+    '三陈': 'SanChen',
+    '昭讨': 'ZhaoTao',
+    '破竹': 'PoZhu',
+    '称象': 'ChengXiang',
+    '仁心': 'RenXin'
   };
 
   let bgm = null;

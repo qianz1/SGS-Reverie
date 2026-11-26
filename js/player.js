@@ -112,6 +112,10 @@
       // 连环状态（【铁索连环】横置）：跨回合保持，只有被铁索重置或受到
       // 属性伤害传导后才会清除；角色框中间的横向锁链由 ui.render 读取它绘制。
       this.chained = false;
+      // ★ 翻面状态：true = 武将牌背面朝上。轮到其回合开始的瞬间先翻回正面，
+      //   然后跳过整个回合（准备 / 判定 / 摸牌 / 出牌 / 弃牌 / 结束）。
+      //   角色框上由 ui.render 叠一层半透明 back.webp 表示背面。
+      this.flipped = false;
       // ── 角色技能用到的「每回合 / 每阶段」状态（统一在 resetTurn 重置）──
       this.playLog = [];            // 本阶段「使用」过的牌（含花色/点数/当作牌型）
       this.trickUsedThisTurn = false; // 本回合是否使用过锦囊牌（【藏拙】）
@@ -214,6 +218,28 @@
     toggleChain() {
       this.chained = !this.chained;
       return this.chained;
+    }
+
+    /**
+     * ★ 翻面：正面 ↔ 背面。翻到背面后，轮到其回合开始的瞬间先翻回正面，
+     *   然后跳过完整回合（见 Game.runTurn）。
+     * @returns {boolean} 翻面后的状态（true = 背面朝上）
+     */
+    flip() {
+      this.flipped = !this.flipped;
+      return this.flipped;
+    }
+
+    /**
+     * ★ 复原武将牌：武将牌翻回正面 + 解除连环状态。
+     *   目前由【涅槃】使用；后续「复原武将牌」类效果统一走这里。
+     * @returns {string[]} 实际做了哪些复原动作（供日志拼装）
+     */
+    restoreGeneral() {
+      const parts = [];
+      if (this.flipped) { this.flipped = false; parts.push('翻回正面'); }
+      if (this.chained) { this.chained = false; parts.push('解除连环状态'); }
+      return parts;
     }
 
     draw(deck, n) {

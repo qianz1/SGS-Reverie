@@ -113,6 +113,24 @@
         }
       }
 
+      // 3.6)【破竹】：一张手牌当【出其不意】使用（未造成伤害则本回合失效）
+      if ((player.skill.conversions || []).some((c) => c.to === 'chubuyi')) {
+        const conv = this.pickConverted(player, 'play', 'chubuyi');
+        if (conv) {
+          const asCard = Object.assign({}, conv.card, {
+            type: 'chubuyi', name: '出其不意', viaSkill: true
+          });
+          if (SGS.Tricks.canUse(g, player, asCard).ok) {
+            await SGS.Tricks.use(g, player, asCard, {
+              realCard: conv.card, asName: '出其不意', asType: 'chubuyi',
+              skillName: '破竹'
+            });
+            await SGS.sleep(350);
+            if (g.over) return;
+          }
+        }
+      }
+
       // 4) 出杀前喝【酒】：本回合限一次，为下一张【杀】伤害 +1。
       //    ★ 必须先确认这张杀真的能打出去：坐骑 / 武器会改变距离，
       //      防具也可能让杀完全无效。打不到就不喝，否则 jiuBuff 会在

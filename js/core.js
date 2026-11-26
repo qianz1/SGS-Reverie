@@ -37,10 +37,20 @@
    */
   SGS.Options = SGS.Options || { autoTakeover: false, skillAuto: {} };
 
-  /** 该技能是否处于「自动发动」状态（未设置过 = 自动，与旧行为一致） */
+  /**
+   * ★ 默认「不自动发动」的技能名。缺省情况下 skillAutoEnabled 返回 true
+   *   （与旧行为一致：伤逝 / 渐营一达成条件就自动摸牌），但【称象】这类
+   *   需要玩家逐张权衡（点数和不大于 13）的技能，默认应由玩家自己决定，
+   *   顶栏勾选框默认不勾。
+   */
+  SGS.SKILL_AUTO_DEFAULT_OFF = ['称象'];
+
+  /** 该技能是否处于「自动发动」状态（未设置过按技能自己的默认值） */
   SGS.skillAutoEnabled = function (name) {
     const map = SGS.Options && SGS.Options.skillAuto;
-    return !map || map[name] !== false;
+    if (map && map[name] === false) return false;
+    if (map && map[name] === true) return true;
+    return (SGS.SKILL_AUTO_DEFAULT_OFF || []).indexOf(name) < 0;
   };
 
   /**

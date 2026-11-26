@@ -76,6 +76,7 @@
     taoyuan:  true,
     juedou:   true,
     huogong:  true,
+    chubuyi:  true,
     jiedaosharen: true,
     wugufengdeng: true,
     tiesuolianhuan: true,
@@ -408,6 +409,77 @@
     await game.damage(target, user, 1, 'fire', { sound: 'huogong' });
   }
 
+  /** 通知角色「这张【出其不意】有没有造成伤害」（【破竹】未造成伤害则本回合失效） */
+  function notifyChubuyi(user, dealt) {
+    if (!user || typeof user.hook !== 'function') return;
+    try { user.hook('onChubuyiResult', !!dealt); } catch (e) { /* 角色未实现 */ }
+  }
+
+  /**
+   * 【出其不意】：使用者**按牌背**从目标手牌里点一张展示（不查看手牌内容，
+   * 与过河拆桥的目标牌区面板同一套交互），展示牌与这张【出其不意】花色
+   * 不同则造成 1 点伤害。
+   *
+   * ★ 只展示、不获得：展示牌留在目标手里（presentCard 的 keepInHand），
+   *   结算结束后不进入弃牌堆。
+   * ★ 主要来源是【破竹】：一张手牌当【出其不意】使用，此时花色取素材牌。
+   */
+  async function resolveChubuyi(game, user, target, card, wxCtx) {
+    let dealt = false;
+    try {
+      if (game.isEffectNegated(wxCtx, target)) return false;
+      const hand = (target.hand || []).filter(Boolean);
+      if (!hand.length) {
+        log(target.name + ' 没有手牌，【出其不意】无法展示。', 'warn');
+        return false;
+      }
+
+      // ① 使用者按牌背选一张（看不见牌面）；AI / 无界面时随机
+      let id = null;
+      if (SGS.isDecider(user) && game.ui && typeof game.ui.waitTrickCard === 'function') {
+        id = await game.ui.waitTrickCard(game, user, target, card, {
+          handOnly: true,
+          hint: '【出其不意】：点选 ' + target.name + ' 的一张手牌（牌背，不查看），' +
+            '再点【确认】展示。'
+        });
+      }
+      let shown = null;
+      if (id) {
+        const entry = (SGS.Zones && typeof SGS.Zones.list === 'function')
+          ? SGS.Zones.list(target).find((e) => e.zone === 'hand' &&
+              String(e.id) === String(id)) : null;
+        if (entry) shown = entry.card;
+      }
+      if (!shown) shown = hand[Math.floor(Math.random() * hand.length)];
+
+      // ② 展示：只亮出来，仍留在目标手里
+      await game.presentCard(shown, target, {
+        dest: 'showcase', note: '出其不意展示', keepInHand: true,
+        from: target.isHuman ? undefined : 'hero'
+      });
+      log(user.name + ' 展示 ' + target.name + ' 的手牌【' + shown.name + '】' +
+        (shown.suit || '') + '。', 'trick');
+      game.ui.render(game);
+      await SGS.sleep(220);
+
+      // ③ 花色不同 → 1 点伤害（无属性）
+      const diff = String(shown.suit || '') !== String(card.suit || '');
+      if (diff) {
+        log('【出其不意】：展示牌' + (shown.suit || '无花色') +
+          '与【出其不意】' + (card.suit || '无花色') + '花色不同，' +
+          target.name + ' 受到 1 点伤害。', 'dmg');
+        dealt = true;
+        await game.damage(target, user, 1);
+      } else {
+        log('【出其不意】：展示牌与【出其不意】花色相同，未造成伤害。', 'warn');
+      }
+      return dealt;
+    } finally {
+      // 无论命中 / 同花色 / 被无懈抵消，都要告诉【破竹】结果
+      notifyChubuyi(user, dealt);
+    }
+  }
+
   /**
    * 借刀杀人：目标是否使用【杀】由 Game.askRespond 统一询问（含 AI）。
    * ① 使用【杀】→ 再画一条「目标 →【杀】目标」的黄线，按正常【杀】结算；
@@ -714,6 +786,9 @@
 
       } else if (card.type === 'huogong') {
         await resolveHuogong(game, user, target, card, wxCtx);
+
+      } else if (card.type === 'chubuyi') {
+        await resolveChubuyi(game, user, target, card, wxCtx);
 
       } else if (card.type === 'jiedaosharen') {
         await resolveBorrow(game, user, target, chosen[1], card, wxCtx);

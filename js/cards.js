@@ -161,6 +161,15 @@
       target: { mode: 'any', maxDistance: Infinity, needHand: true },
       desc: '出牌阶段，对一名有手牌的角色使用（可选自己）。该角色展示一张手牌；若你弃置一张与其花色相同的手牌，则对其造成 1 点火焰伤害。'
     },
+    /* ★【出其不意】只由【破竹】（杜预）把一张手牌转化出来使用，
+       不进入 DECK_LAYOUT，因此摸牌堆 / 弃牌堆里永远不会出现这张牌。 */
+    chubuyi: {
+      name: '出其不意',
+      category: 'trick',
+      image: 'ChuBuYi.webp',
+      target: { mode: 'other', maxDistance: Infinity, needHand: true },
+      desc: '出牌阶段，对一名有手牌的其他角色使用。你展示其一张手牌，若此牌与【出其不意】花色不同，你对其造成 1 点伤害。'
+    },
     jiedaosharen: {
       name: '借刀杀人',
       category: 'trick',
@@ -603,6 +612,22 @@
 
     nameOf(type) {
       return CARD_DEFS[type] ? CARD_DEFS[type].name : type;
+    },
+
+    /**
+     * ★ 点数的数值：A=1、2~10、J=11、Q=12、K=13。
+     *   【称象】这类「点数和不超过 13 / 恰好 13」的技能按它计算。
+     *   牌面 rank 一直是字符串（RANKS），非法值按 0 处理，不会算出 NaN。
+     */
+    pointOf(card) {
+      if (!card) return 0;
+      const r = String(card.rank == null ? '' : card.rank).toUpperCase();
+      if (r === 'A') return 1;
+      if (r === 'J') return 11;
+      if (r === 'Q') return 12;
+      if (r === 'K') return 13;
+      const n = parseInt(r, 10);
+      return isNaN(n) ? 0 : n;
     },
 
     /** 图片文件名（拼音 + .webp），无则回退到 CSS 绘制的卡面 */

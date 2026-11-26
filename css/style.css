@@ -876,10 +876,13 @@ body input, body textarea, body [contenteditable="true"] {
 /* ================= 牌局记录（左下浮层） ================= */
 .log-box {
   position: absolute;
+  /* ★ 左上角、顶栏（AI 托管 / 技能自动那排）正下方：与顶栏左边缘对齐。
+     高度只占展示区可用高度的一半，避免遮挡桌面。 */
   left: 1vw;
-  top: var(--table-top);
+  top: calc(clamp(26px, 7vh, 34px) + 8px);
   width: clamp(120px, 18vw, 190px);
-  height: var(--table-h);
+  height: calc((var(--table-top) + var(--table-h) - clamp(26px, 7vh, 34px) - 16px) / 2);
+  min-height: 66px;
   display: flex; flex-direction: column;
   background: rgba(12, 9, 7, .78);
   border: 1px solid rgba(217,178,106,.35);
@@ -1277,6 +1280,17 @@ body input, body textarea, body [contenteditable="true"] {
   display: none;   /* 仅 has-art 时显示，加载失败不会露出破图 */
 }
 .hero-card.has-art .hero-art { display: block; }
+/* ★ 翻面：武将牌背面朝上时，在立绘之上盖一层半透明的牌背。
+   z-index 介于立绘（0）与名字 / 体力圆点等文字（3）之间，文字仍可读；
+   pointer-events: none 保证点击角色框照常可用（选目标 / 查看技能）。
+   没有立绘的角色（has-art 未置）也显示牌背，正好代替 CSS 暗纹。 */
+.hero-card .hero-flip {
+  display: block;
+  z-index: 1;
+  opacity: .8;
+  pointer-events: none;
+}
+.hero-card .hero-flip.hidden { display: none !important; }
 .hero-card.has-art { background: #14100d; }
 /* ★ 图片素材铺满后只撤掉 CSS 暗纹；势力图标、竖排名字、体力圆点等
    动态信息仍由 DOM 叠加显示（z-index 高于 .hero-art 的 0）。 */
@@ -1646,6 +1660,28 @@ body input, body textarea, body [contenteditable="true"] {
   white-space: nowrap;
   text-shadow: 0 2px 5px #000, 0 0 9px #000;
   pointer-events: none;
+}
+/* ★ 亮牌多选（【称象】）：已选的牌常亮金边上浮，与五谷的「已被拿走」区分 */
+.wugu-card.picked {
+  transform: translateY(-10px);
+  outline: 2px solid #ffd75e;
+  outline-offset: 2px;
+  box-shadow: 0 0 20px rgba(255,215,94,.55);
+  filter: brightness(1.12);
+}
+.wugu-card.picked:hover { transform: translateY(-12px) scale(1.04); }
+.wugu-sum {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: clamp(10px, 1.7vh, 15px);
+  letter-spacing: 1px;
+}
+.wugu-sum.over { color: #ff8a6b; font-weight: 700; }
+.wugu-actions {
+  flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: center;
+  gap: clamp(8px, 1.4vw, 18px);
+  padding-bottom: clamp(2px, .6vh, 8px);
 }
 
 /* ================= 【火计·火攻】查看目标手牌面板 =================

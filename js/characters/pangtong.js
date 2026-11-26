@@ -56,7 +56,7 @@
   /** 涅槃可获得的三个技能，顺序即 UI 选项顺序 */
   const NIRVANA_CHOICES = [
     { label: '获得【八阵】', value: '八阵', desc: '锁定技：无防具时视为装备【八卦阵】。' },
-    { label: '获得【火计】', value: '火计', desc: '红色牌当【火攻】，火攻改为看手牌、弃同色手牌。' },
+    { label: '获得【火计】', value: '火计', desc: '红色牌当【火攻】，火攻改为观看手牌后展示一张、弃同色手牌。' },
     { label: '获得【看破】', value: '看破', desc: '黑色牌当【无懈可击】，且不可被响应。' }
   ];
 
@@ -78,7 +78,7 @@
     '火计': {
       name: '火计',
       titles: '☆火计',
-      desc: '☆火计：你可以将一张红色牌当【火攻】使用。你的【火攻】改为你展示目标一张手牌，你弃置与其展示牌颜色相同的手牌以造成伤害。',
+      desc: '☆火计：你可以将一张红色牌当【火攻】使用。你的【火攻】改为你观看目标的手牌然后展示其中一张牌，你弃置与其展示牌颜色相同的手牌以造成伤害。',
       huogongRule: { peek: true, match: 'color' },
       buttonName(scene) { return scene === 'wuxie' ? '连环' : '火计'; },
       conversions: [
@@ -177,8 +177,11 @@
           } else {
             parts.push('区域内无牌可弃');
           }
-          // ② 复原武将牌：当前只解除连环状态，后续在这里扩展
-          if (player.chained) {
+          // ② 复原武将牌：翻回正面 + 解除连环状态（Player.restoreGeneral 统一收口）
+          if (typeof player.restoreGeneral === 'function') {
+            const done = player.restoreGeneral();
+            if (done.length) parts.push(done.join('、'));
+          } else if (player.chained) {
             player.chained = false;
             parts.push('解除连环状态');
           }

@@ -117,6 +117,8 @@
       );
     }
     // 【火计】红→火攻 /【看破】黑→无懈可击：合法性交给规则层 canUse 复核
+    // ★【破竹】：未造成伤害的那张【出其不意】结算后，本回合此技能失效
+    if (conv.to === 'chubuyi') return !player.pozhuDisabled;
     return true;
   }
 
@@ -377,6 +379,17 @@
           if (!t || typeof t.closest !== 'function') return;
           const cardEl = t.closest('.wugu-card');
           if (cardEl && cardEl.dataset.id) this.onWuguCardClick(cardEl.dataset.id);
+        });
+      }
+
+      // ★【称象】亮牌多选面板：点一张切换「获得 / 不获得」，确认在面板底部
+      const rvp = $('reveal-panel');
+      if (rvp && rvp.addEventListener) {
+        rvp.addEventListener('click', (e) => {
+          const t = e.target;
+          if (!t || typeof t.closest !== 'function') return;
+          const cardEl = t.closest('.wugu-card');
+          if (cardEl && cardEl.dataset.id) this.onRevealCardClick(cardEl.dataset.id);
         });
       }
 
@@ -769,6 +782,9 @@
       const titles = String((player && player.skill && player.skill.titles) || '');
       if (titles.indexOf('伤逝') >= 0) return '伤逝';
       if (titles.indexOf('渐营') >= 0) return '渐营';
+      // ★【称象】的「自动」含义不是摸牌，而是「到点直接发动、不询问」，
+      //   默认不勾（见 SGS.SKILL_AUTO_DEFAULT_OFF）。
+      if (titles.indexOf('称象') >= 0) return '称象';
       return '';
     }
 
@@ -804,10 +820,15 @@
         skillWrap.classList.toggle('hidden', !name);
       }
       if (name) {
-        if (skillLabel) skillLabel.textContent = name + '自动摸牌';
+        // 伤逝 / 渐营的效果是「自动摸牌」，称象是「到点自动发动」——
+        // 标签按技能区分，玩家一眼能看出勾了会怎样。
+        const isDraw = name === '伤逝' || name === '渐营';
+        if (skillLabel) {
+          skillLabel.textContent = name + (isDraw ? '自动摸牌' : '自动发动');
+        }
         if (skillWrap && skillWrap.setAttribute) {
-          skillWrap.setAttribute('title',
-            '勾选：达成条件时自动摸牌；取消：询问是否发动【' + name + '】');
+          skillWrap.setAttribute('title', '勾选：达成条件时自动' +
+            (isDraw ? '摸牌' : '发动') + '；取消：询问是否发动【' + name + '】');
         }
         if (skillBox) skillBox.checked = SGS.skillAutoEnabled(name);
       }
@@ -1869,6 +1890,7 @@
       // 只比较会影响画面的字段，避免 char 对象里的方法 / 引用造成假变化。
       const dSig = (d) => !d ? '' : sig({
         name: d.name, hp: d.hp, maxHp: d.maxHp, chained: d.chained,
+        flipped: d.flipped,
         handCount: d.handCount, handIds: d.handIds,
         hand: (d.hand || []).map((c) => c.id),
         delayed: (d.delayed || []).map((c) => c.id),
@@ -1892,6 +1914,15 @@
 
       if (meChanged) this.renderSide(me, 'me');
       if (aiChanged) this.renderSide(ai, 'ai');
+      // 翻面遮罩随增量渲染同步（回合跳过时只走 renderPatch 的路径）
+      if (meChanged) {
+        const mf = $('me-flip');
+        if (mf && mf.classList) mf.classList.toggle('hidden', !me.flipped);
+      }
+      if (aiChanged) {
+        const af = $('ai-flip');
+        if (af && af.classList) af.classList.toggle('hidden', !ai.flipped);
+      }
       if (meChanged || aiChanged) this.renderEquips(game);
       if (meChanged) setHTML('me-judge-marks', this.judgeMarkHTML(me));
       if (aiChanged) setHTML('ai-judge', this.judgeMarkHTML(ai));
@@ -1980,12 +2011,17 @@
       if (aiChain && aiChain.classList) aiChain.classList.toggle('hidden', !ai.chained);
       if (meChain && meChain.classList) meChain.classList.toggle('hidden', !me.chained);
 
+      // ★ 翻面：武将牌背面朝上时，在立绘之上叠一层半透明牌背（back.webp）
+      const aiFlip = $('ai-flip'), meFlip = $('me-flip');
+      if (aiFlip && aiFlip.classList) aiFlip.classList.toggle('hidden', !ai.flipped);
+      if (meFlip && meFlip.classList) meFlip.classList.toggle('hidden', !me.flipped);
+
       // 玩家手牌：出牌 / 技能选牌 / 响应选闪 / 弃牌共用同一套高亮与刚选中动画。
       // justPicked 只标记本次新选中的那张，避免每次重绘时已选卡牌一起重播动画。
       const nonHandMode = !!pd &&
         (pd.mode === 'target' || pd.mode === 'targets' ||
          pd.mode === 'trick' || pd.mode === 'optional' ||
-         pd.mode === 'wugu' || pd.mode === 'peek' ||
+         pd.mode === 'wugu' || pd.mode === 'peek' || pd.mode === 'reveal' ||
          pd.mode === 'chainTargets' ||
          pd.mode === 'choice' || pd.mode === 'wuxie');
       let selected = [];
@@ -3395,6 +3431,11 @@
         pushSkillButtons(list, this, pd, 'brink', 'tao');
         list.push({ label: '放弃', onClick: () => this.finish(null) });
         this.setActions(list, { noSkillPlaceholder: true });
+
+      } else if (pd.mode === 'reveal') {
+        // 亮牌多选（【称象】）：确认 / 不获得都在亮牌面板底部，操作区只提示。
+        this.setActions([{ label: '请在亮牌面板中选择…', disabled: true }],
+          { noSkillPlaceholder: true });
       }
     }
 
@@ -3442,9 +3483,14 @@
         .map((c) => c.label || ('当【' + SGS.Cards.nameOf(c.to) + '】'))
         .join(' / ');
       const btnName = pd.skillName || skillButtonName(skill, scene);
-      this.setHint('点选一张牌（手牌或装备区）发动【' + btnName + '】' +
+      // ★ 素材范围必须与技能实际可选的区域一致（用户要求「牌」与「手牌」分清）：
+      //   全部方向都标了 handOnly（如【破竹】）→ 只说「一张手牌」；
+      //   其余技能描述写「一张牌」→ 手牌 + 装备区都能选，明确写出来。
+      const handOnly = dirs.length > 0 && dirs.every((c) => c.handOnly);
+      const srcText = handOnly ? '一张手牌' : '一张牌（手牌或装备区）';
+      this.setHint('点选' + srcText + '发动「' + btnName + '」' +
         (dirText ? '（' + dirText + '）' : '') +
-        '，再点上方操作区的【' + btnName + '】确认。');
+        '，再点上方操作区的「' + btnName + '」确认。');
       this.refreshActions();
       this.render(pd.game);
     }
@@ -3831,6 +3877,7 @@
       this.clearTargetPickMarks();
       if (pd.mode === 'trick') this.closeTargetPanel();
       if (pd.mode === 'peek') this.closePeekPanel();
+      if (pd.mode === 'reveal') this.closeRevealPanel();
       // ★ 五谷丰登面板从亮牌起一直保留到全部分配结束，不在单次选牌后关闭
       if (pd.mode === 'chainTargets') this.closeChainHint();
       this.refreshActions(); // 无 pending 时显示「等待中…」
@@ -4372,8 +4419,9 @@
           respondNeed: opts.skillNeed || null,
           hintText: opts.hint || null
         };
-        this.setHint(opts.hint || '请点选手牌，再点操作区的【' +
-          (opts.confirmLabel || '确认') + '】。');
+        this.setHint(opts.hint || ('请点选' + (opts.allowEquip
+          ? '手牌或装备牌' : '手牌') + '，再点操作区的【' +
+          (opts.confirmLabel || '确认') + '】。'));
         this.refreshActions();
         this.render(game);
       });
@@ -4539,6 +4587,107 @@
     closeWuguPanel() {
       this.wuguSession = null;
       const panel = $('wugu-panel');
+      if (!panel) return;
+      panel.innerHTML = '';
+      if (panel.classList) panel.classList.add('hidden');
+    }
+
+    /* ---------------- 亮牌多选面板（【称象】） ---------------- */
+
+    /** 一组牌的点数和（A=1、J/Q/K = 11/12/13） */
+    sumPoints(cards) {
+      return (cards || []).reduce((s, c) =>
+        s + (SGS.Cards.pointOf ? SGS.Cards.pointOf(c) : 0), 0);
+    }
+
+    /**
+     * ★ 亮牌多选：亮出牌堆顶 N 张，点选其中任意张（点数和不超过 limit）。
+     *   与【五谷丰登】不同：不分轮次、一次选完、可以一张都不选（【不获得】）。
+     * @returns {Promise<string[]>} 选中的牌 id（不获得 → []）
+     */
+    waitReveal(game, player, cards, opts) {
+      opts = opts || {};
+      const limit = opts.limit == null ? 13 : opts.limit;
+      return new Promise((resolve) => {
+        this.pending = {
+          mode: 'reveal', player, game, resolve,
+          cards: (cards || []).slice(),
+          selected: [],
+          limit: limit,
+          title: opts.title || '亮牌',
+          note: opts.note || '',
+          confirmLabel: opts.confirmLabel || '获得'
+        };
+        this.setHint('【' + (opts.title || '亮牌') + '】点选要获得的牌' +
+          '（点数和不超过 ' + limit + '），再点面板下方的【' +
+          (opts.confirmLabel || '获得') + '】；也可以选择不获得。');
+        this.refreshActions();
+        this.render(game);
+        this.renderRevealPanel();
+      });
+    }
+
+    /** 点亮牌面板里的牌：切换「获得 / 不获得」 */
+    onRevealCardClick(id) {
+      const pd = this.pending;
+      if (!pd || pd.mode !== 'reveal') return;
+      if (!pd.cards.some((c) => String(c.id) === String(id))) return;
+      const i = pd.selected.indexOf(id);
+      if (i >= 0) pd.selected.splice(i, 1);
+      else pd.selected.push(id);
+      pd.selected = pd.selected.slice();
+      this.renderRevealPanel();
+    }
+
+    renderRevealPanel() {
+      const pd = this.pending && this.pending.mode === 'reveal' ? this.pending : null;
+      const panel = $('reveal-panel');
+      if (!panel) return;
+      if (!pd) {
+        panel.innerHTML = '';
+        if (panel.classList) panel.classList.add('hidden');
+        return;
+      }
+      const sel = pd.selected || [];
+      const chosen = pd.cards.filter((c) => sel.indexOf(c.id) >= 0);
+      const sum = this.sumPoints(chosen);
+      const over = sum > pd.limit;
+      panel.innerHTML =
+        '<div class="wugu-title">' + escText(pd.title) + '</div>' +
+        '<div class="wugu-sub">' + (pd.note ? escText(pd.note) + ' · ' : '') +
+          '点选要获得的牌（点数和不超过 ' + pd.limit + '）</div>' +
+        '<div class="wugu-cards">' +
+          pd.cards.map((c) => {
+            const on = sel.indexOf(c.id) >= 0;
+            return '<div class="wugu-card' + (on ? ' picked' : '') + '"' +
+              ' data-id="' + c.id + '">' + this.cardHTML(c) +
+              (on ? '<div class="peek-badge">获得</div>' : '') + '</div>';
+          }).join('') +
+        '</div>' +
+        '<div class="wugu-sum' + (over ? ' over' : '') + '">已选 ' + chosen.length +
+          ' 张 · 点数和 ' + sum + ' / ' + pd.limit +
+          (over ? '（超出上限）' : '') + '</div>' +
+        '<div class="wugu-actions">' +
+          '<button class="btn primary" id="reveal-confirm"' +
+            (over ? ' disabled' : '') + '>' + escText(pd.confirmLabel) + '</button>' +
+          '<button class="btn" id="reveal-cancel">不获得</button>' +
+        '</div>';
+      if (panel.classList) panel.classList.remove('hidden');
+      const ok = $('reveal-confirm'), no = $('reveal-cancel');
+      if (ok && ok.addEventListener) {
+        ok.addEventListener('click', () => {
+          if (this.sumPoints(pd.cards.filter(
+            (c) => pd.selected.indexOf(c.id) >= 0)) > pd.limit) return;
+          this.finish(pd.selected.slice());
+        });
+      }
+      if (no && no.addEventListener) {
+        no.addEventListener('click', () => this.finish([]));
+      }
+    }
+
+    closeRevealPanel() {
+      const panel = $('reveal-panel');
       if (!panel) return;
       panel.innerHTML = '';
       if (panel.classList) panel.classList.add('hidden');

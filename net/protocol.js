@@ -73,7 +73,12 @@
   P.packArgs = function (args, game, viewerSeat) {
     const pool = P.visibleCards(game, viewerSeat);
     const ids = Object.keys(pool);
-    const seen = [];
+    // ★ 只用「当前递归路径」防环，不能用全局 seen 去重：
+    //   ask 的第一个参数 user 往往同时出现在 targets 里（火攻 / 三陈 /
+    //   铁索都可以指定自己）。用全局 seen 时第二次遇到同一个角色会写成
+    //   null，客机解包后目标列表里自己变成 null → 点自己的角色框被判定为
+    //   「不是合法目标」，就是「客机三陈选不了自己」的根因。
+    const path = [];
 
     function walk(v) {
       if (v == null || typeof v === 'number' || typeof v === 'boolean' ||
@@ -86,17 +91,23 @@
         });
         return { __t: 'fn', allow: allow };
       }
-      if (seen.indexOf(v) >= 0) return null;   // 防御环形引用
-      seen.push(v);
+      if (path.indexOf(v) >= 0) return null;   // 真正的环形引用
+      // 叶子对象（Game / 角色 / 牌）不会继续递归，不需要进出栈
       if (isGame(v)) return { __t: 'game' };
       if (isPlayer(v)) return { __t: 'p', seat: v.seat };
       if (isCard(v)) return { __t: 'c', card: plainCard(v) };
-      if (Array.isArray(v)) return v.map(walk);
-      const out = {};
-      Object.keys(v).forEach((k) => {
-        if (k === 'resolve' || k === 'game') return;  // 不传内部字段
-        out[k] = walk(v[k]);
-      });
+      path.push(v);
+      let out;
+      if (Array.isArray(v)) {
+        out = v.map(walk);
+      } else {
+        out = {};
+        Object.keys(v).forEach((k) => {
+          if (k === 'resolve' || k === 'game') return;  // 不传内部字段
+          out[k] = walk(v[k]);
+        });
+      }
+      path.pop();
       return out;
     }
     return (args || []).map(walk);
@@ -351,10 +362,14 @@
       name: p.name,
       hp: p.hp, maxHp: p.maxHp,
       chained: !!p.chained,
+      flipped: !!p.flipped,   // 武将牌背面朝上（翻面）：客机角色框同样盖牌背
       // 回合内状态：客机的按钮置灰 / 技能栏要靠这些字段
       shaUsed: p.shaUsed || 0, jiuUsed: !!p.jiuUsed,
       jianyingUsed: !!p.jianyingUsed,
       jianmieUsed: !!p.jianmieUsed,
+      sanchenUsed: !!p.sanchenUsed,
+      sanchenNoTarget: !!p.sanchenNoTarget,
+      pozhuDisabled: !!p.pozhuDisabled,
       trickUsedThisTurn: !!p.trickUsedThisTurn,
       // ★ 涅槃等局中获得的技能 / 已用掉的一次性技能：客机按钮与技能栏要同步
       skills: (p.acquiredSkills || []).slice(),
@@ -432,9 +447,13 @@
       p.isRemote = !p.isHuman;
       p.maxHp = d.maxHp; p.hp = d.hp;
       p.chained = !!d.chained;
+      p.flipped = !!d.flipped;
       p.shaUsed = d.shaUsed || 0; p.jiuUsed = !!d.jiuUsed;
       p.jianyingUsed = !!d.jianyingUsed;
       p.jianmieUsed = !!d.jianmieUsed;
+      p.sanchenUsed = !!d.sanchenUsed;
+      p.sanchenNoTarget = !!d.sanchenNoTarget;
+      p.pozhuDisabled = !!d.pozhuDisabled;
       p.trickUsedThisTurn = !!d.trickUsedThisTurn;
       // 重建本玩家的技能视图：char.skill 不共享，避免污染另一个座位
       p.acquiredSkills = [];

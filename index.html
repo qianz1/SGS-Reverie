@@ -125,6 +125,8 @@
   <!-- 敌方武将卡：顶部居中；右上角「敌」，左下角只显示手牌张数数字 -->
   <section id="ai-area" class="hero-card foe" data-player="ai">
     <img class="hero-art" id="ai-art" alt="">
+    <!-- ★ 翻面：武将牌背面朝上时，在立绘之上叠一层半透明牌背 -->
+    <img class="hero-art hero-flip hidden" id="ai-flip" src="assets/characters/back.webp" alt="">
     <div class="hero-faction" id="ai-faction"></div>
     <div class="hero-q">敌</div>
     <div class="hero-name" id="ai-name"></div>
@@ -167,6 +169,8 @@
   <!-- 玩家武将卡：右下角金框，右上角「主」 -->
   <section id="me-area" class="hero-card self" data-player="me">
     <img class="hero-art" id="me-art" alt="">
+    <!-- ★ 翻面：武将牌背面朝上时，在立绘之上叠一层半透明牌背 -->
+    <img class="hero-art hero-flip hidden" id="me-flip" src="assets/characters/back.webp" alt="">
     <div class="hero-faction" id="me-faction"></div>
     <div class="hero-q">主</div>
     <div class="hero-name" id="me-name"></div>
@@ -185,6 +189,9 @@
 
   <!-- 目标牌区面板：顺手牵羊 / 过河拆桥选牌时弹出（标题 + 手牌 + 装备牌 + 判定区牌） -->
   <div id="target-panel" class="target-panel hidden"></div>
+
+  <!-- 亮牌多选面板：【称象】等「亮出牌堆顶 N 张，从中选任意张获得」 -->
+  <div id="reveal-panel" class="wugu-panel hidden"></div>
 
   <!-- 五谷丰登选牌面板：亮出的牌一栏横排，点击即选（无需确认） -->
   <div id="wugu-panel" class="wugu-panel hidden"></div>
@@ -282,6 +289,8 @@
 <script src="js/characters/wolongzhuge.js"></script>
 <script src="js/characters/pangtong.js"></script>
 <script src="js/characters/zhangchunhua.js"></script>
+<script src="js/characters/duyu.js"></script>
+<script src="js/characters/caochong.js"></script>
 <script src="js/player.js"></script>
 <script src="js/ai.js"></script>
 <script src="js/ui.js"></script>
