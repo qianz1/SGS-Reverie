@@ -199,6 +199,11 @@
       this._relayMode = false;
       this._relayTimer = null;
       this._closed = false;
+      // ★ 心跳：DataChannel 会出现「一端 ready 但数据发不出去」的半死状态
+      //   （校园网 / NAT 会话超时很常见）。只靠 ready 判断会两边僵住：
+      //   一方显示已连接、另一方显示数据通道断开，谁也开不了局。
+      this._lastRx = 0;
+      this._hbTimer = null;
       const self = this;
 
       this.sig = new Net.Signaling({
@@ -219,16 +224,22 @@
         onOpen: () => {
           self._clearRelayTimer();
           if (self._relayMode) return;      // 已经走中继，就不再切回去
+          self._lastRx = Date.now();
           self.onState('channel:open');
           self.flushFrames();
         },
         onClose: (why) => {
-          if (self._closed) return;           // 主动关闭：不要再切中继
+          // ★ 已经切到中继 / 主动关闭：不要再用「断开」把中继状态覆盖掉
+          //   （之前的现象：主机其实已经在中继上，界面却停在红色「数据通道断开」）
+          if (self._closed || self._relayMode) return;
           self.onState('channel:close', { why: why });
           // ★ 直连断了 / 从来没连通 → 改用公网中继，对局不中断
           self.useRelay(why);
         },
-        onMessage: (m) => self.onFrame(m),
+        onMessage: (m) => {
+          if (m && (m.t === 'ping' || m.t === 'pong')) { self._onHeartbeat(m); return; }
+          self.onFrame(m);
+        },
         // ★ 两端各自 getStats() 的 local candidate 是镜像的，直接各显示各的
         //   会出现「两端判定不一致」。统一由主机测一次，
         //   再随帧下发给客机，两边永远显示同一条链路结论。
@@ -250,7 +261,40 @@
       // announce / hello 由 Signaling 在每次 CONNACK 后驱动（含重连），
       // 这里不再同步发，避免 ws 还在 CONNECTING 时丢包。
       this.sig.start();
+      this._startHeartbeat();
       return this;
+    }
+
+    /* ---------------- 心跳：识别「ready 但发不出去」的半死通道 ---------------- */
+
+    _startHeartbeat() {
+      if (this._hbTimer || typeof setInterval !== 'function') return;
+      const t = setInterval(() => this._hbTick(), 4000);
+      if (t && typeof t.unref === 'function') t.unref();
+      this._hbTimer = t;
+    }
+    _stopHeartbeat() {
+      if (this._hbTimer) { clearInterval(this._hbTimer); this._hbTimer = null; }
+    }
+    _hbTick() {
+      if (this._closed) return;
+      if (this._relayMode) return;                       // 中继自带 broker 保活
+      if (!this.transport || !this.transport.ready) return;
+      // 收到过东西之后才开始计时判定，避免刚 open 就误判
+      // 15s 收不到任何心跳 / 游戏帧才判定通道已死：给后台标签页的
+      // 定时器节流（可能被压到 1 次/分钟）留足余量，避免误切。
+      if (this._lastRx && Date.now() - this._lastRx > 15000) {
+        this.useRelay('stale');
+        return;
+      }
+      // 直接从 transport 发，不走 this.send 的排队逻辑
+      try { this.transport.send({ t: 'ping', ts: Date.now() }); } catch (e) {}
+    }
+    _onHeartbeat(m) {
+      this._lastRx = Date.now();
+      if (m.t === 'ping' && !this._relayMode && this.transport && this.transport.ready) {
+        try { this.transport.send({ t: 'pong', ts: m.ts }); } catch (e) {}
+      }
     }
 
     /**
@@ -274,14 +318,25 @@
 
     /**
      * 切到公网中继：后续游戏帧一律经信令 broker 转发（服务器地址不变）。
-     * 同一条帧也会让对端在收到后自动切过来，两端始终走同一条路。
+     *
+     * ★ 必须「主动告知对端」：只在本端切是不够的 —— 对端可能还停留在
+     *   一条 ready 但已经发不出数据的直连上（校园网 NAT 会话超时的典型表现：
+     *   一端显示已连接、另一端显示数据通道断开，双方互等、永远开不了局）。
+     *   这里发一条 {t:'relay'} 控制帧，对端收到后立即跟着切。
+     *   opts.silent = 对端告知触发的切换，不再回通知，避免两端乒乓。
      */
-    useRelay(why) {
+    useRelay(why, opts) {
       if (this._relayMode) return false;
       this._relayMode = true;
       this._clearRelayTimer();
+      this._stopHeartbeat();
       try { this.transport.close(); } catch (e) { /* 已断开 */ }
       this.onState('channel:relay', { why: why || '' });
+      if (!(opts && opts.silent)) {
+        try { this.sig.sendRelay({ t: 'relay' }); } catch (e) {}
+      }
+      // 握手帧可能正好丢在那条死掉的直连上 → 切过来之后补发一次
+      this._resyncAfterRelay();
       this.flushFrames();
       return true;
     }
@@ -289,13 +344,32 @@
     /** 收到对端经中继发来的帧：对端已经切了，本端跟着切，避免单向不通 */
     onRelayFrame(frame) {
       if (!frame || !frame.t) return;
-      if (!this._relayMode) {
-        this._relayMode = true;
-        this._clearRelayTimer();
-        try { this.transport.close(); } catch (e) {}
-        this.onState('channel:relay', { why: 'peer' });
-      }
+      this._lastRx = Date.now();
+      if (!this._relayMode) this.useRelay('peer', { silent: true });
+      if (frame.t === 'relay') return;          // 只是切换通知，不喂给规则层
       this.onFrame(frame);
+    }
+
+    /**
+     * 切到中继后重放「握手类」帧。
+     *   · char：选将结果 —— 直连挂掉时这一帧最可能已经丢了，
+     *     丢了主机就永远等不到对手武将，也就不会开始对局（本次的卡死根因）。
+     *   · init + 快照：主机已经开局时，补一份完整状态给客机。
+     */
+    _resyncAfterRelay() {
+      try {
+        if (this.myCharId) {
+          this.send({ t: 'char', charId: this.myCharId, role: this.role });
+        }
+        if (this.role !== 'host') return;
+        if (this.game && typeof this.pushSnapshot === 'function') {
+          // 已经开过局：把 init 与权威快照补发一遍
+          if (typeof this.sendInit === 'function') this.sendInit();
+          this.pushSnapshot(true);
+        } else if (this.remoteCharId && typeof this.maybeBegin === 'function') {
+          this.maybeBegin();
+        }
+      } catch (e) { /* 补发失败不影响后续帧 */ }
     }
 
     onSignal(type, data) {
@@ -332,6 +406,7 @@
 
     onFrame(m) {
       if (!m || !m.t) return;
+      this._lastRx = Date.now();
       switch (m.t) {
         case 'char': this.onChar(m); break;
         case 'init': this.onInit(m); break;
@@ -369,6 +444,7 @@
     close() {
       this._closed = true;
       this._clearRelayTimer();
+      this._stopHeartbeat();
       try { this.sig.close(); } catch (e) {}
       try { this.transport.close(); } catch (e) {}
       (this._fxQueue || []).forEach((r) => { if (r.timer) clearTimeout(r.timer); });
@@ -391,7 +467,10 @@
     onChar(m) { this.remoteCharId = m.charId; this.maybeBegin(); }
     maybeBegin() {
       if (this.started || !this.myCharId || !this.remoteCharId) return;
-      if (!this.transport.ready) {   // 数据面没通就等，不丢开局
+      // ★ 数据面没通就等 —— 但「已切公网中继」也算通了：
+      //   中继模式下 transport.ready 永远是 false，若还按它判就会永远 pending，
+      //   表现就是「双方都显示已连接、却一直不开局」。
+      if (!this.transport.ready && !this._relayMode) {
         this._beginPending = true;
         return;
       }
@@ -464,9 +543,7 @@
       // ★ 每次状态渲染都推一次按座位裁剪的快照（合并 24ms 内的连续 render）
       ui.onRender = () => self.pushSnapshot();
       ui.onLog = (m, c) => self.send({ t: 'log', m: m, c: c });
-      this.send({ t: 'init', seat: this.remoteSeat,
-        hostCharId: this.myCharId, guestCharId: this.remoteCharId,
-        hostSeat: game.human.seat });
+      this.sendInit();
       this.pushSnapshot(true);
       this.onState('game:start');
       game.run().then(() => {
@@ -474,6 +551,13 @@
         const hostWon = !!(alive && alive === game.human);
         self.send({ t: 'over', hostWon: hostWon });
       }).catch(() => {});
+    }
+    /** 把「对局初始化」帧补发一次（中继切换后重同步也用它） */
+    sendInit() {
+      if (!this.game) return;
+      this.send({ t: 'init', seat: this.remoteSeat,
+        hostCharId: this.myCharId, guestCharId: this.remoteCharId,
+        hostSeat: this.game.human.seat });
     }
     /**
      * ★ 表现层帧的收件人座位列表。
@@ -498,7 +582,11 @@
         });
       };
       if (this._snapTimer) clearTimeout(this._snapTimer);
-      if (immediate) emit(); else this._snapTimer = setTimeout(emit, 24);
+      // ★ 中继模式下每次 send 都是一次 MQTT 发布：把渲染驱动的快照合并得
+      //   更粗（120ms），避免一次动画连发几十条把公共 broker 打到限流。
+      //   fx 之前的「同事务快照」仍然是 immediate，不受影响。
+      if (immediate) emit();
+      else this._snapTimer = setTimeout(emit, this._relayMode ? 120 : 24);
     }
     onActFrame(m) { this.remoteUI.onAct(m.id, m.value); }
   }
@@ -746,7 +834,7 @@
     'signal:disconnected': '信令断开，正在重连…', 'signal:error': '信令连接失败',
     'peer:joined': '对手已加入，正在建连…', 'channel:open': '已连接，等待开局',
     // ★ 不提示「走的是哪种联机方式」：打洞失败自动转公网中继，玩家只需要知道连上了
-    'channel:relay': '已连接，等待开局',
+    'channel:relay': '已连接',
     'channel:close': '数据通道断开', 'presence': '房间状态更新',
     'waiting-host': '已选将，等待房主开局…', 'game:init': '对局已同步',
     'game:start': '对局开始', 'game:over': '对局结束'
