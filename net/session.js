@@ -2,8 +2,10 @@
  * net/session.js — 联机会话编排（主机权威 / 客机视图 / 联机面板）
  *
  * 架构三层（对应前面定下的口径）：
- *   Pages 静态前端  →  MQTT over WSS 只做建连信令  →  WebRTC DataChannel 直传
+ *   Pages 静态前端  →  MQTT over WSS 建连信令  →  WebRTC DataChannel 直传
  *   主机浏览器跑完整 SGS.Game（唯一权威），客机只有一个「视图 Game」。
+ *   ★ P2P 打洞失败（ICE failed / 超时未 open）时自动改走「公网中继」：
+ *     游戏帧经同一台 broker 转发（地址即信令地址），对局不中断。
  *
  * 最小侵入的关键 —— RouterUI：
  *   Game 里所有决策都是 `if (decider) await this.ui.waitXxx(...)`。
@@ -24,8 +26,8 @@
   const CFG_KEY = 'sgs_net_cfg_v1';
 
   /* ================= 配置 ================= */
-  // ★ 固定公共 broker，不再让用户输入地址；TURN 兜底整体移除，
-  //   只保留 STUN 打洞（打不通就明确提示，不再悄悄绕中继）。
+  // ★ 固定公共 broker，不再让用户输入地址；P2P 打不通时游戏帧也经它转发
+  //   （公网中继兜底），所以这里既是信令地址也是中继地址。
   const DEFAULTS = {
     brokerUrl: 'wss://broker-cn.emqx.io:8084/mqtt', appId: 'sanguosha'
   };
@@ -59,6 +61,9 @@
     waitPlay: 0, waitRespond: 0, waitDiscard: 0, waitPick: 0, waitBrink: 0,
     waitTarget: 0, waitTargets: 0, waitWugu: 1, waitPeekHand: 0,
     waitChainTargets: 0, waitChoice: 0, waitTrickCard: 1,
+    // ★【称象】亮牌多选：签名 (game, player, cards, opts) → 决策者是第 1 个参数。
+    //   不加这条时远端玩家的称象会弹在主机屏幕上（主机替他选），客机永远等不到。
+    waitReveal: 1,
     waitOptional: 0, waitWuXie: 0
   };
   Net.WAIT_INDEX = WAIT_INDEX;
@@ -75,6 +80,8 @@
     'clearTableCard', 'flyCard', 'flyCards', 'animateDraw',
     'showTargetLine', 'showTargetLines', 'showHitFX', 'shakeHero',
     'openWugu', 'setWuguTurn', 'markWuguTaken', 'closeWuguPanel',
+    // ★【称象】的公开亮牌：效果是「亮出牌堆顶的牌」，两端都要看到同一批牌
+    'showRevealPublic', 'markRevealTaken', 'closeRevealPanel',
     'closePeekPanel', 'closeTargetPanel'
   ];
   Net.FX_METHODS = FX_METHODS;
@@ -187,6 +194,11 @@
       this._fxQueue = [];
       this._appliedTx = 0;
       this._lastSnap = null;
+      // ★ 公网中继兜底：WebRTC 打洞失败（ICE failed / 迟迟不 open）时，
+      //   游戏帧改由「做信令的同一台 broker」转发，地址不需要再配。
+      this._relayMode = false;
+      this._relayTimer = null;
+      this._closed = false;
       const self = this;
 
       this.sig = new Net.Signaling({
@@ -195,7 +207,8 @@
         WebSocketImpl: opts.WebSocketImpl,
         onState: (s, x) => self.onState('signal:' + s, x),
         onPresence: (m) => self.onState('presence', m),
-        onSignal: (type, data) => self.onSignal(type, data)
+        onSignal: (type, data) => self.onSignal(type, data),
+        onRelay: (frame) => self.onRelayFrame(frame)
       });
       this.sid = this.sig.sid;
       this.transport = new Net.Transport({
@@ -203,11 +216,21 @@
         iceServers: Net.defaultIceServers(),
         RTCPeerConnectionImpl: opts.RTCPeerConnectionImpl,
         onSignal: (type, data) => self.sig.sendSignal(type, data),
-        onOpen: () => { self.onState('channel:open'); self.flushFrames(); },
-        onClose: (why) => self.onState('channel:close', { why: why }),
+        onOpen: () => {
+          self._clearRelayTimer();
+          if (self._relayMode) return;      // 已经走中继，就不再切回去
+          self.onState('channel:open');
+          self.flushFrames();
+        },
+        onClose: (why) => {
+          if (self._closed) return;           // 主动关闭：不要再切中继
+          self.onState('channel:close', { why: why });
+          // ★ 直连断了 / 从来没连通 → 改用公网中继，对局不中断
+          self.useRelay(why);
+        },
         onMessage: (m) => self.onFrame(m),
         // ★ 两端各自 getStats() 的 local candidate 是镜像的，直接各显示各的
-        //   会出现「一边局域网直连、一边公网打洞」。统一由主机测一次，
+        //   会出现「两端判定不一致」。统一由主机测一次，
         //   再随帧下发给客机，两边永远显示同一条链路结论。
         onLink: (info) => {
           if (self.role === 'host') {
@@ -230,28 +253,81 @@
       return this;
     }
 
+    /**
+     * ★ 等 P2P 的时间上限：收到 hello / offer 之后开始计时。
+     *   到点还没 open（或中途 failed）就走公网中继 —— 不能让玩家一直卡在
+     *   「对手已加入，正在建连…」上，尤其是手机热点 / 公司网这类打洞高发失败环境。
+     */
+    _armRelayFallback(ms) {
+      if (this._relayMode || this._relayTimer) return;
+      const t = setTimeout(() => {
+        this._relayTimer = null;
+        if (this.transport && this.transport.ready) return;   // 已经直连上了
+        this.useRelay('timeout');
+      }, ms == null ? 8000 : ms);
+      if (t && typeof t.unref === 'function') t.unref();       // 自测环境不阻塞退出
+      this._relayTimer = t;
+    }
+    _clearRelayTimer() {
+      if (this._relayTimer) { clearTimeout(this._relayTimer); this._relayTimer = null; }
+    }
+
+    /**
+     * 切到公网中继：后续游戏帧一律经信令 broker 转发（服务器地址不变）。
+     * 同一条帧也会让对端在收到后自动切过来，两端始终走同一条路。
+     */
+    useRelay(why) {
+      if (this._relayMode) return false;
+      this._relayMode = true;
+      this._clearRelayTimer();
+      try { this.transport.close(); } catch (e) { /* 已断开 */ }
+      this.onState('channel:relay', { why: why || '' });
+      this.flushFrames();
+      return true;
+    }
+
+    /** 收到对端经中继发来的帧：对端已经切了，本端跟着切，避免单向不通 */
+    onRelayFrame(frame) {
+      if (!frame || !frame.t) return;
+      if (!this._relayMode) {
+        this._relayMode = true;
+        this._clearRelayTimer();
+        try { this.transport.close(); } catch (e) {}
+        this.onState('channel:relay', { why: 'peer' });
+      }
+      this.onFrame(frame);
+    }
+
     onSignal(type, data) {
       if (type === 'hello' && this.role === 'host') {
         this.onState('peer:joined');
         if (this._offerPending) {
           this._offerPending = false;
           this.transport.makeOffer().catch(() => {});
+          // 对手已到：开始给 P2P 计时，超时就转公网中继
+          this._armRelayFallback();
         }
         return;
       }
-      if (type === 'offer') { this.transport.acceptOffer(data).catch(() => {}); return; }
+      if (type === 'offer') {
+        this.transport.acceptOffer(data).catch(() => {});
+        this._armRelayFallback();
+        return;
+      }
       if (type === 'answer') { this.transport.acceptAnswer(data).catch(() => {}); return; }
       if (type === 'candidate') { this.transport.addCandidate(data).catch(() => {}); return; }
     }
 
     /** DataChannel 未 open 时排队，绝不静默丢动作 */
     send(frame) {
+      // ★ 中继模式：直接走信令 broker（地址与信令相同，不额外部署）
+      if (this._relayMode) { this.sig.sendRelay(frame); return; }
       if (!this.transport.ready) { this._frameQueue.push(frame); return; }
       this.transport.send(frame);
     }
     flushFrames() {
       const list = this._frameQueue.splice(0);
-      list.forEach((f) => this.transport.send(f));
+      list.forEach((f) => this.send(f));
     }
 
     onFrame(m) {
@@ -291,6 +367,8 @@
     maybeBegin() {}
 
     close() {
+      this._closed = true;
+      this._clearRelayTimer();
       try { this.sig.close(); } catch (e) {}
       try { this.transport.close(); } catch (e) {}
       (this._fxQueue || []).forEach((r) => { if (r.timer) clearTimeout(r.timer); });
@@ -666,7 +744,9 @@
   const LABEL = {
     'signal:connecting': '正在连接信令…', 'signal:connected': '信令已连接',
     'signal:disconnected': '信令断开，正在重连…', 'signal:error': '信令连接失败',
-    'peer:joined': '对手已加入，正在建连…', 'channel:open': '已直连，等待开局',
+    'peer:joined': '对手已加入，正在建连…', 'channel:open': '已连接，等待开局',
+    // ★ 不提示「走的是哪种联机方式」：打洞失败自动转公网中继，玩家只需要知道连上了
+    'channel:relay': '已连接，等待开局',
     'channel:close': '数据通道断开', 'presence': '房间状态更新',
     'waiting-host': '已选将，等待房主开局…', 'game:init': '对局已同步',
     'game:start': '对局开始', 'game:over': '对局结束'
@@ -752,14 +832,14 @@
             let txt = LABEL[s] || s;
             if (s === 'game:start') txt = '对局开始 · 你是一号位吗请看座位号';
             state(txt, /error|失败|断开/.test(txt) ? 'err'
-              : /open|start|init|joined/.test(s) ? 'ok' : '');
+              : /open|relay|start|init|joined/.test(s) ? 'ok' : '');
           },
           onLink: (info) => {
-            const kind = info.kind === 'host' ? '局域网直连'
-              : info.kind === 'srflx' ? '公网打洞' : '中继';
-            const rtt = info.rtt == null ? '' : ' · ' + info.rtt + ' ms';
-            NetUI.linkSuffix = kind + rtt;
-            state('已直连（信令已断也不影响对局）', 'ok');
+            // ★ 不显示「直连 / 打洞 / 中继」这类联机方式，
+            //   只保留一个中性的连接状态（延迟数据仍可用于排查卡顿）。
+            const rtt = info && info.rtt != null ? ' · ' + info.rtt + ' ms' : '';
+            NetUI.linkSuffix = rtt;
+            state('已连接（信令已断也不影响对局）', 'ok');
           }
         });
         sessionRef.current = sess;

@@ -24,7 +24,7 @@
  *  桃园结义  对每名角色（含自己）：各回复 1 点体力
  *  决斗      选一名其他角色：由目标起轮流打【杀】，先不出者受对方 1 点伤害
  *  火攻      展示手牌，弃同花色手牌则造成 1 点火焰伤害（可选自己）
- *            ★【卧龙诸葛·火计】改写：使用者查看目标手牌并挑一张展示，
+ *            ★【诸葛亮·火计】改写：使用者查看目标手牌并挑一张展示，
  *              弃置「颜色相同」的手牌；取消旧的观看牌堆顶 / 控顶排序设计
  *  借刀杀人  令目标对另一名角色出【杀】，否则其武器归你
  *  铁索连环  横置 / 重置 1~2 名角色；横置者在属性伤害下依次传导并全部重置；
@@ -302,7 +302,7 @@
    * ★ 两种规则：
    *   ① 原版（普通角色）：由【目标】自己决定展示哪张；使用者弃置
    *      「花色相同」的手牌。
-   *   ②【火计】改写（卧龙诸葛，skill.huogongRule）：
+   *   ②【火计】改写（诸葛亮，skill.huogongRule）：
    *        peek  = true    使用者查看目标全部手牌，自己挑一张展示
    *                        （新 UI：ui.waitPeekHand()）
    *        match = 'color' 弃置「颜色相同」的手牌（红 ♥♦ / 黑 ♠♣）
@@ -667,6 +667,13 @@
     const real = opts.realCard || card;
     if (typeof game.playCardVoice === 'function') {
       game.playCardVoice(user, real, card.type);
+    }
+    // ★ 技能转化牌的技能大字 / 语音：同样在目标选定之后播。
+    //   由转化项声明 announceAfterTarget（【破竹】→【出其不意】）时，
+    //   Game.applyPlay 会把技能名传进来；取消选目标已经在上面的 return 走了，
+    //   所以不会白响。
+    if (opts.announceSkill && typeof game.announceSkill === 'function') {
+      game.announceSkill(user, opts.announceSkill);
     }
     const target = chosen[0];
     const mode = SGS.Cards.targetOf(card.type).mode;

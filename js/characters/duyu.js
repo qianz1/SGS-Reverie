@@ -105,6 +105,9 @@
           // ★ handOnly：素材只认手牌（装备区的牌不能转化）。UI 的选牌引导
           //   据此写「点选一张手牌发动」，而不是笼统的「一张牌」。
           handOnly: true,
+          // ★ 破竹要选目标（出其不意）：技能语音等目标选定后再播，
+          //   选素材 / 点技能按钮时不播。由 Tricks.use 统一在目标确定后发声。
+          announceAfterTarget: true,
           label: '一张手牌当【出其不意】' }
       ],
       /** 【出其不意】结算结果回调（由 tricks.js 的 resolveChubuyi 调用） */
@@ -162,6 +165,9 @@
         name: '三陈',
         scenes: ['play'],
         once: false,   // 「限一次」由 player.sanchenUsed 管（成功时会被重置）
+        // ★ 语音 / 技能大字在「选完目标」之后由 run() 自己播一次，
+        //   点按钮时先不播 —— 否则取消选目标也会白响。
+        announce: false,
         usable(player) {
           return !player.sanchenUsed && !player.sanchenNoTarget;
         },
@@ -195,10 +201,15 @@
           }
           if (!target) return false;
 
+          // ★ 目标已确定 → 现在才播【三陈】的技能大字 / 语音。
+          if (typeof game.announceSkill === 'function') {
+            game.announceSkill(player, '三陈');
+          }
+
           player.sanchenCount = (player.sanchenCount || 0) + 1;
           if (SGS.log) {
-            // 刻意不写「发动【三陈】」：技能大字 / 语音在点按钮时已经播过，
-            // 这里再写一次会让日志兜底在慢速选择目标后重播。
+            // 刻意不写「发动【三陈】」：技能大字 / 语音已经在上面播过，
+            // 这里再写一次会让日志兜底重播。
             SGS.log(player.name + ' 的【三陈】目标为 ' + target.name + '：' +
               '令其摸三张牌，然后弃置三张牌。', 'sys');
           }

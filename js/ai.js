@@ -123,7 +123,9 @@
           if (SGS.Tricks.canUse(g, player, asCard).ok) {
             await SGS.Tricks.use(g, player, asCard, {
               realCard: conv.card, asName: '出其不意', asType: 'chubuyi',
-              skillName: '破竹'
+              skillName: '破竹',
+              // 与真人同一时机：目标确定之后才播技能大字 / 语音
+              announceSkill: '破竹'
             });
             await SGS.sleep(350);
             if (g.over) return;
@@ -209,6 +211,13 @@
             type: 'huogong', name: '火攻'
           });
           if (!SGS.Tricks.canUse(g, player, asCard).ok) break;
+          // ★ 火攻的后续结算要先「展示目标一张手牌」再「弃置一张同色手牌」
+          //   才能造成伤害：发动后若手里一张牌都不剩，等于白扔一张素材。
+          //   所以按「付掉素材后还剩几张手牌」判：素材来自手牌就减 1，
+          //   来自装备区则手牌数不变。剩 0 张 → 不发动。
+          const materialInHand = (player.hand || []).indexOf(conv.card) >= 0;
+          const handLeft = (player.hand || []).length - (materialInHand ? 1 : 0);
+          if (handLeft < 1) break;
           const ok = await SGS.Tricks.use(g, player, asCard, {
             realCard: conv.card, asName: '火攻', asType: 'huogong',
             skillName: '火计'

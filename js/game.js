@@ -1042,7 +1042,13 @@
             // ★ 铁索连环固定取转化项自己的技能名，避免获得【火计】后
             //   buttonName('play') 变成火计，把 ♣ 转化误记成发动火计
             skillName: conv.to === 'tiesuolianhuan'
-              ? (conv.skill || '连环') : SGS.skillNameFor(p, 'play')
+              ? (conv.skill || '连环') : SGS.skillNameFor(p, 'play'),
+            // ★ 需要选目标的转化技（【破竹】）：技能大字 / 语音交给
+            //   Tricks.use 在目标选定之后播 —— 选素材、点技能按钮时不响，
+            //   取消选目标也不会白播。没标 announceAfterTarget 的技能
+            //   （火计 / 看破 / 连环 / 渐营）各有自己的播报点，不重复。
+            announceSkill: conv.announceAfterTarget
+              ? (conv.skill || SGS.skillNameFor(p, 'play')) : null
           });
         }
         if (SGS.log) SGS.log('这张牌不能在此阶段发动该转化。', 'warn');
@@ -2310,7 +2316,7 @@
             typeof player.canUseAsType !== 'function' ||
             !player.canUseAsType(card, 'wuxiekeji')) return null;
         asName = '无懈可击';
-        // ★ 按场景取真实发动的技能名：卧龙诸葛是【看破】，不是主技能【火计】
+        // ★ 按场景取真实发动的技能名：诸葛亮是【看破】，不是主技能【火计】
         skillName = SGS.skillNameFor(player, 'wuxie') || player.skill.name;
       } else {
         // 真【无懈可击】理论上只在手牌，但仍用统一「牌」范围兜底，
@@ -2380,13 +2386,13 @@
         }
         this.ui.render(this);
         await SGS.sleep(260);
-        // ★【看破】：卧龙诸葛的【无懈可击】不可被响应 —— 直接结束
+        // ★【看破】：诸葛亮的【无懈可击】不可被响应 —— 直接结束
         //   「无懈打无懈」链（只影响无懈，不是全场禁响应）。
         const unrespondable = used.player && used.player.skill &&
           ((typeof used.player.hook === 'function' && used.player.hook('wuXieUnrespondable')) ||
            used.player.skill.wuXieUnrespondable === true);
         if (unrespondable) {
-          // ★ 技能名按场景取（卧龙诸葛 wuxie →【看破】）。
+          // ★ 技能名按场景取（诸葛亮 wuxie →【看破】）。
           //   转化无懈时上面那条日志已写「发动【看破】」，日志兜底已经播过
           //   大字 + 语音，这里绝不再播一次，否则同一技能会出两条音频；
           //   用【真·无懈可击】时没有这类日志，仍需显式播一次。
@@ -2474,7 +2480,7 @@
       //   ★【青釭剑】无视防具 → 这次杀里八卦阵也不能发动。
       if (need === 'shan' && !armorNegated &&
           SGS.Equipment && SGS.Equipment.armorFlag(target, 'bagua')) {
-        // ★【八阵】发动点：卧龙诸葛装备区没有防具、需要用【闪】、且使用
+        // ★【八阵】发动点：诸葛亮装备区没有防具、需要用【闪】、且使用
         //   虚拟【八卦阵】进行判定时。armorCard() 的 virtual 标记正好区分
         //   「八阵虚拟防具」与「真装备的八卦阵」：
         //     · 装了任意真防具 → 八阵不生效（有 bagua 标记时也是真八卦阵）

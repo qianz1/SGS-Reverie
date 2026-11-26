@@ -1,6 +1,6 @@
 /**
- * characters/wolongzhuge.js
- * 【蜀】卧龙诸葛 —— 体力 3，称号「卧龙」，四技能 火计 / 看破 / 八阵 / 藏拙。
+ * characters/zhugeliang.js
+ * 【蜀】诸葛亮 —— 体力 3，称号「卧龙」，四技能 火计 / 看破 / 八阵 / 藏拙。
  *
  * 技能契约（角色文件内聚实现，主循环 / UI / AI 只认统一钩子）：
  *   火计（含「可以」，主动转化走右下技能按钮）
@@ -25,10 +25,10 @@
  *       （含延时锦囊）不计入手牌上限。
  *
  * ★ 更名后全项目口径统一：显示名 / 介绍名 / 立绘 / 角色 id / 脚本文件名
- *   都按「卧龙诸葛」取拼音 wolongzhuge：
- *     脚本 js/characters/wolongzhuge.js（index.html 引用同一路径）
- *     id / Characters key = wolongzhuge
- *     立绘 assets/characters/SHU-WoLongZhuGe.webp（core.js 自动补势力前缀）
+ *   都按「诸葛亮」取拼音 zhugeliang：
+ *     脚本 js/characters/zhugeliang.js（index.html 引用同一路径）
+ *     id / Characters key = zhugeliang
+ *     立绘 assets/characters/SHU-ZhuGeLiang.webp（core.js 自动补势力前缀）
  */
 (function (global) {
   const SGS = global.SGS || (global.SGS = {});
@@ -36,15 +36,15 @@
 
   /** —— 角色数据 —— */
   const data = {
-    id: 'wolongzhuge',
-    name: '卧龙诸葛',        // 规则层 / 日志用的完整名
-    displayName: '卧龙诸葛', // 角色框里只写名字（不带势力前缀）
-    introName: '卧龙诸葛',   // 角色介绍里写「蜀·卧龙诸葛」
+    id: 'zhugeliang',
+    name: '诸葛亮',        // 规则层 / 日志用的完整名
+    displayName: '诸葛亮', // 角色框里只写名字（不带势力前缀）
+    introName: '诸葛亮',   // 角色介绍里写「蜀·诸葛亮」
     title: '卧龙',
     faction: '蜀',
-    image: 'WoLongZhuGe.webp',       // → SHU-WoLongZhuGe.webp
+    image: 'ZhuGeLiang.webp',       // → SHU-ZhuGeLiang.webp
     maxHp: 3,
-    avatar: '卧',
+    avatar: '诸',
     gender: 'male'
   };
 
@@ -119,5 +119,5 @@
     }
   };
 
-  Characters.wolongzhuge = Object.assign({}, data, { skill: skill });
+  Characters.zhugeliang = Object.assign({}, data, { skill: skill });
 })(typeof window !== 'undefined' ? window : globalThis);

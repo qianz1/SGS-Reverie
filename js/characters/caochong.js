@@ -180,17 +180,36 @@
         (extra ? '，上次点数和为13，本次多亮一张' : '') + '）。', 'sys');
     }
     if (game.ui && typeof game.ui.render === 'function') game.ui.render(game);
+    // ★【称象】的效果就是「亮出牌堆顶的牌」——亮牌对全场公开，
+    //   所以先摊一块只读面板给所有人看（联机时经 FX_METHODS 广播）。
+    //   本地决策者随后由 waitReveal 弹出的交互面板盖在它上面（同一批牌）。
+    if (game.ui && typeof game.ui.showRevealPublic === 'function') {
+      game.ui.showRevealPublic(game, player, cards, {
+        title: '称象',
+        note: '亮出牌堆顶 ' + cards.length + ' 张牌'
+      });
+    }
     await SGS.sleep(140);
 
     const got = await chooseCards(game, player, cards);
     const gotIds = got.map((c) => String(c.id));
     const rest = cards.filter((c) => gotIds.indexOf(String(c.id)) < 0);
 
+    // 只读面板上标出被拿走的牌，稍作停留再收起（看不清等于没亮）
+    if (game.ui && typeof game.ui.markRevealTaken === 'function') {
+      game.ui.markRevealTaken(gotIds);
+    }
+
     if (got.length) {
       await gainToHand(game, player, got);
     }
     if (rest.length && typeof game.deck.discard === 'function') {
       game.deck.discard(rest);
+    }
+    // 亮牌面板收尾：停留一会儿让所有人都看清，再收起（决策者那条路已自己关掉）
+    if (game.ui && typeof game.ui.closeRevealPanel === 'function') {
+      await SGS.sleep(520);
+      game.ui.closeRevealPanel();
     }
 
     const sum = got.reduce((s, c) => s + (SGS.Cards.pointOf(c) || 0), 0);

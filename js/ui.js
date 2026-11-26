@@ -72,7 +72,7 @@
   /**
    * 角色介绍（信息浮层 / 选将卡片）里的名字：「势力·名字」。
    * 神赵云 → 「神·赵云」，蜀张飞 → 「蜀·张飞」，
-   * 卧龙诸葛 → 「蜀·卧龙诸葛」（角色数据用 introName 指定介绍名）。
+   * 诸葛亮 → 「蜀·诸葛亮」（角色数据用 introName 指定介绍名）。
    * 称号单独一行，不并入名字；这样同名不同势力版本一眼可分。
    */
   function introNameOf(p) {
@@ -83,7 +83,7 @@
 
   /**
    * 技能按钮在当前场景显示的短名。多技能角色可覆盖 buttonName(scene)：
-   * 【卧龙诸葛】出牌阶段是「火计」，无懈响应时是「看破」。
+   * 【诸葛亮】出牌阶段是「火计」，无懈响应时是「看破」。
    */
   function skillButtonName(skill, scene) {
     if (!skill) return '';
@@ -4643,11 +4643,7 @@
       const pd = this.pending && this.pending.mode === 'reveal' ? this.pending : null;
       const panel = $('reveal-panel');
       if (!panel) return;
-      if (!pd) {
-        panel.innerHTML = '';
-        if (panel.classList) panel.classList.add('hidden');
-        return;
-      }
+      if (!pd) return this.renderRevealView();     // 没有决策中的亮牌 → 画只读版
       const sel = pd.selected || [];
       const chosen = pd.cards.filter((c) => sel.indexOf(c.id) >= 0);
       const sum = this.sumPoints(chosen);
@@ -4687,16 +4683,76 @@
     }
 
     closeRevealPanel() {
+      this.publicReveal = null;
       const panel = $('reveal-panel');
       if (!panel) return;
       panel.innerHTML = '';
       if (panel.classList) panel.classList.add('hidden');
     }
 
+    /**
+     * ★ 公共亮牌（只读）：【称象】这类「亮出牌堆顶的牌」的技能，效果本身就是
+     *   把牌摊给所有人看，因此除决策者以外的人也要显示这块面板。
+     *
+     *   与 waitReveal 的区别：
+     *     · 不写 this.pending、不阻塞任何流程（纯展示）；
+     *     · 决策者的交互面板优先级更高（renderRevealPanel 先画 pending）；
+     *     · 选完用 markRevealTaken() 在被拿走的牌上打「获得」标记，
+     *       closeRevealPanel() 收尾。
+     *   联机时通过 FX_METHODS 广播，主客机两端看到同一批亮牌。
+     */
+    showRevealPublic(game, player, cards, opts) {
+      opts = opts || {};
+      this.publicReveal = {
+        game: game || null,
+        player: player || null,
+        cards: (cards || []).slice(),
+        taken: [],
+        title: opts.title || '亮牌',
+        note: opts.note || ''
+      };
+      this.renderRevealPanel();
+    }
+
+    /** 公共亮牌：标出被获得者拿走的牌（只读面板上的「获得」角标） */
+    markRevealTaken(ids) {
+      const pv = this.publicReveal;
+      if (!pv) return;                       // 决策者那条路已经关掉面板 → 无需重画
+      pv.taken = (ids || []).map(String);
+      this.renderRevealPanel();
+    }
+
+    /** 只读亮牌面板（无按钮、不可点选） */
+    renderRevealView() {
+      const panel = $('reveal-panel');
+      if (!panel) return;
+      const pv = this.publicReveal;
+      if (!pv) {
+        panel.innerHTML = '';
+        if (panel.classList) panel.classList.add('hidden');
+        return;
+      }
+      const taken = (pv.taken || []).map(String);
+      const who = pv.player && pv.player.name ? pv.player.name + ' ' : '';
+      panel.innerHTML =
+        '<div class="wugu-title">' + escText(pv.title) + '</div>' +
+        '<div class="wugu-sub">' + escText(who) +
+          (pv.note ? escText(pv.note) : '亮出的牌') + '</div>' +
+        '<div class="wugu-cards">' +
+          pv.cards.map((c) => {
+            const on = taken.indexOf(String(c.id)) >= 0;
+            return '<div class="wugu-card' + (on ? ' picked' : '') + '" data-id="' +
+              c.id + '">' + this.cardHTML(c) +
+              (on ? '<div class="peek-badge">获得</div>' : '') + '</div>';
+          }).join('') +
+        '</div>';
+      if (panel.classList) panel.classList.remove('hidden');
+    }
+
     /* ---------------- 【火计·火攻】查看目标手牌面板 ---------------- */
 
     /**
-     * ★【卧龙诸葛·火计】改写的【火攻】：使用者查看目标的手牌，自己挑一张
+     * ★【诸葛亮·火计】改写的【火攻】：使用者查看目标的手牌，自己挑一张
      *   展示。面板里的牌是【正面】（使用者可以看见，不用牌背），点选只是
      *   「看 + 指定展示」，不会把牌拿走；确认后返回被选中的牌 id。
      * AI 不弹面板，由 tricks.resolveHuogong() 自动挑一张能造成伤害的。

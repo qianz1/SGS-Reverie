@@ -1,10 +1,13 @@
 /**
- * net/signaling.js — MQTT 信令层（只承载建连那几 KB，游戏数据不经过 broker）
+ * net/signaling.js — MQTT 信令层（平时只承载建连那几 KB）
  *
  * 这正是「取其精华」的落点：
  *   · 之前 MQTT 方案拉胯，是因为每个游戏动作都经 broker，再叠 QoS 排队 /
- *     重传与 TCP 队头阻塞；现在 MQTT 只在开局交换 offer/answer/ICE，
+ *     重传与 TCP 队头阻塞；现在 MQTT 平时只在开局交换 offer/answer/ICE，
  *     之后即使 broker 挂了，对局照常跑。
+ *   · ★ 例外：WebRTC 打洞失败时，Session 会切到「公网中继」——
+ *     游戏帧也经这台 broker 的 inbox 转发（地址与信令完全一致），
+ *     保证打不通 P2P 的两位玩家也能把对局打完。
  *   · 之前「加入房间容易失败」靠的是 MQTT 的长连接 + 自动重订阅 + LWT；
  *     这些能力保留，而且 SDP 绝不放 retained（迟到者会拿到过期 offer）。
  *
@@ -45,6 +48,9 @@
       this.onSignal = opts.onSignal || function () {};   // (type, data, from)
       this.onState = opts.onState || function () {};    // (state, extra)
       this.onPresence = opts.onPresence || function () {};
+      // ★ 公网中继兜底：P2P 打不通时，游戏帧改由同一个 broker 转发。
+      //   地址就是本文件连的信令地址 —— 不额外部署任何服务。
+      this.onRelay = opts.onRelay || function () {};    // (frame)
 
       const self = this;
       this.inbox = this.topic('inbox/' + this.peerId);
@@ -121,6 +127,13 @@
     /** 发给 Transport 的 onSignal 用：统一走 _send */
     sendSignal(type, data) { return this._send(type, data); }
 
+    /**
+     * ★ 公网中继：把一帧游戏数据经 broker 转发给对方。
+     *   P2P（WebRTC）打洞失败时由 Session 调用，每次一发一条 inbox 消息，
+     *   仍带 (from, seq) 去重，QoS1 重发不会让动作执行两次。
+     */
+    sendRelay(frame) { return this._send('relay', frame || {}); }
+
     _onMqtt(topic, payload) {
       let msg;
       try { msg = JSON.parse(payload); } catch (e) { return; }
@@ -163,6 +176,13 @@
 
       if (msg.type === 'hello') { this.remoteReady = true; this._flush(); }
       if (msg.type === 'offer' || msg.type === 'answer') this.remoteReady = true;
+
+      // ★ 公网中继帧：与 PeerConnection 无关，不做 sid 过滤
+      //   （ICE restart 会换 sid，但中继本来就绕过了它）。
+      if (msg.type === 'relay') {
+        try { this.onRelay(msg.data || {}); } catch (e) {}
+        return;
+      }
 
       // sid 不匹配（ICE restart 之前的旧会话）直接丢
       if (msg.sid && this.sid && msg.sid !== this.sid &&

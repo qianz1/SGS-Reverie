@@ -214,7 +214,7 @@
           if (!fallback) fallback = r;
           // ★ 取「nominated 且 succeeded」的最优 pair，而不是遍历到的最后一个。
           //   两端 stats 顺序不同会各选到不同 pair —— 这正是之前两边标签
-          //   不一致（一边局域网直连、一边公网打洞）的第二个原因。
+          //   不一致（两端选到不同 pair）的第二个原因。
           if ((r.nominated || r.selected) && r.state === 'succeeded') {
             if (!pair || (r.currentRoundTripTime != null &&
                 (pair.currentRoundTripTime == null ||
@@ -227,7 +227,7 @@
         }
         if (!pair) pair = fallback || last;
         if (!pair) return null;
-        // ★ 整条 pair 两端一起判：只取 local 会把 host↔srflx 误标成局域网直连。
+        // ★ 整条 pair 两端一起判：只取 local 会把 host↔srflx 误判成纯宿主候选。
         const local = candidates[pair.localCandidateId] || {};
         const remote = candidates[pair.remoteCandidateId] || {};
         const types = [local.candidateType || local.type || '',
@@ -257,7 +257,11 @@
 
   Net.Transport = Transport;
 
-  /** 默认 ICE：只做 STUN 打洞。TURN 中继兜底已整体移除（打不通会明确提示）。 */
+  /**
+   * 默认 ICE：只做 STUN 打洞。
+   * ★ 打洞失败（ICE failed / 超时没 open）不在这里处理 —— 由 Session
+   *   切到「公网中继」（复用信令 broker 转发游戏帧），不依赖 TURN 服务。
+   */
   Net.defaultIceServers = function () {
     return [{ urls: 'stun:stun.cloudflare.com:3478' }];
   };

@@ -1685,7 +1685,7 @@ body input, body textarea, body [contenteditable="true"] {
 }
 
 /* ================= 【火计·火攻】查看目标手牌面板 =================
-   卧龙诸葛改写后的【火攻】：使用者查看目标全部手牌，自己挑一张展示。
+   诸葛亮改写后的【火攻】：使用者查看目标全部手牌，自己挑一张展示。
    面板里的牌是正面（原卡牌贴图 + 花色点数，不用牌背），点选只指定展示、
    不拿走牌；确认按钮在手牌上方操作区。旧的牌堆顶控顶面板已移除。 */
 .peek-panel {
@@ -2277,7 +2277,10 @@ body.allow-portrait .rotate-hint { display: none !important; }
   min-height: 100%;
   padding-bottom: clamp(16px, 4vh, 40px);
 }
-.start-bg-wrap { position: absolute; inset: 0; overflow: hidden; }
+/* ★ 背景层用 fixed：选将层本身是滚动容器（内容超高时整层上下滑），
+   如果背景也跟着 absolute 定位，滑动时背景会一起被拖走。
+   固定在视口 → 只有名单在滚动，背景（图 + 纱）始终不动。 */
+.start-bg-wrap { position: fixed; inset: 0; overflow: hidden; }
 .start-bg {
   position: absolute; inset: 0;
   width: 100%; height: 100%;
@@ -2298,7 +2301,7 @@ body.allow-portrait .rotate-hint { display: none !important; }
   clip-path: polygon(0 100%,0 58%,7% 44%,14% 62%,23% 30%,32% 66%,41% 44%,50% 70%,60% 34%,69% 62%,79% 42%,88% 66%,100% 48%,100% 100%);
 }
 .start-veil {
-  position: absolute; inset: 0; pointer-events: none;
+  position: fixed; inset: 0; pointer-events: none;
   background:
     linear-gradient(180deg, rgba(6,12,22,.82) 0%, rgba(6,12,22,.42) 34%,
                     rgba(6,12,22,.52) 72%, rgba(6,12,22,.88) 100%),
