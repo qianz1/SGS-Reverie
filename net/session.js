@@ -44,7 +44,8 @@
         const v = obj[k];
         if (v == null || v === '') return;
         if (k === 'brokerUrl') {
-          const n = Net.normalizeBrokerUrl(v);
+          // 按页面协议补前缀：https 页面存下来就是 wss://
+          const n = Net.normalizeBrokerUrl(v, (global.location || {}).protocol || '');
           if (n) out[k] = n;
           return;
         }
@@ -64,7 +65,8 @@
       const out = { appId: cfg.appId || 'sanguosha' };
       // ★ 只把「非默认」的自建地址落盘：换回公共服务器时不该留下陈旧地址
       if (cfg.brokerUrl && cfg.brokerUrl !== DEFAULTS.brokerUrl) {
-        const n = Net.normalizeBrokerUrl(cfg.brokerUrl);
+        const n = Net.normalizeBrokerUrl(cfg.brokerUrl,
+          (global.location || {}).protocol || '');
         if (n) out.brokerUrl = n;
       }
       if (cfg.token) out.token = String(cfg.token);
@@ -1124,11 +1126,13 @@
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g,
     (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
+  /**
+   * ★ 4 位纯数字房间码：好念、好输入（口头/微信传达都方便）。
+   *   取 1000–9999 避免前导零被吞；理论上只有 9000 种，公共服务器上
+   *   撞车概率极低，但并非为零 —— 真撞上了换个码即可（房主可自填）。
+   */
   function randomRoom() {
-    const a = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    let s = '';
-    for (let i = 0; i < 6; i++) s += a[Math.floor(Math.random() * a.length)];
-    return s;
+    return String(1000 + Math.floor(Math.random() * 9000));
   }
   Net.randomRoom = randomRoom;
 
@@ -1184,8 +1188,9 @@
         '<div id="net-body" class="net-body hidden">' +
           '<div class="net-row net-room-row">' +
             '<label class="net-fld net-fld-room"><span>房间号</span>' +
-              '<input id="net-room" spellcheck="false" maxlength="12" ' +
-              'placeholder="6 位房间码" value="' + esc(cfg.room || '') + '"></label>' +
+              '<input id="net-room" spellcheck="false" maxlength="8" ' +
+              'inputmode="numeric" ' +
+              'placeholder="4 位数字" value="' + esc(cfg.room || '') + '"></label>' +
             '<span class="net-room-tip">留空则自动生成</span>' +
           '</div>' +
           '<div class="net-row net-actions net-row-1v1">' +
@@ -1201,7 +1206,7 @@
           '<div class="net-row net-broker-row">' +
             '<label class="net-fld net-fld-broker"><span>中继服务器（留空 = 公共服务器）</span>' +
               '<input id="net-broker" spellcheck="false" ' +
-              'placeholder="ws://公网IP:端口/mqtt" value="' +
+              'placeholder="1.2.3.4:6080 或 域名（前缀可省略）" value="' +
               esc(cfg.brokerUrl && cfg.brokerUrl !== DEFAULTS.brokerUrl
                 ? cfg.brokerUrl : '') + '"></label>' +
             '<button id="net-broker-test" class="net-btn ghost" type="button">测试</button>' +
@@ -1209,7 +1214,7 @@
           '<div id="net-broker-tip" class="net-broker-tip">' +
             '自己开服：房主电脑运行 node server/broker.js 8080，' +
             '再用 frp（自建或第三方 TCP 隧道）映射该端口，' +
-            '这里填 ws://公网地址:端口/mqtt</div>' +
+            '这里填公网地址：IP:端口 或 域名，前缀 /mqtt 都可省略</div>' +
           '<div id="net-status" class="net-status"><i></i><span>未连接 · 默认本地 AI 对战</span></div>' +
         '</div>';
       const tools = global.document.getElementById('pick-tools') ||
@@ -1248,12 +1253,14 @@
       const brokerOf = () => {
         const raw = brokerRaw();
         if (!raw) return { url: DEFAULTS.brokerUrl, custom: false, error: '' };
-        const url = Net.normalizeBrokerUrl(raw);
+        const pageProto = (global.location || {}).protocol || '';
+        // ★ 前缀可以完全省略：按页面协议补 ws/wss；再兜一层 https 页面强制升级。
+        let url = Net.brokerUrlForPage(
+          Net.normalizeBrokerUrl(raw, pageProto), pageProto);
         if (!url) {
           return { url: '', custom: true,
-            error: '中继地址格式不对，应形如 ws://1.2.3.4:6080/mqtt' };
+            error: '中继地址格式不对，应形如 1.2.3.4:6080 或 域名（前缀可省略）' };
         }
-        const pageProto = (global.location || {}).protocol || '';
         const bad = Net.brokerUrlProblem(url, pageProto);
         if (bad) return { url: url, custom: true, error: bad };
         return { url: url, custom: true, error: '' };

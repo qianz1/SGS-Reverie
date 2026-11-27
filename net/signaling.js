@@ -244,24 +244,27 @@
   }
 
   /**
-   * ★ 中继地址规范化：玩家在输入框里可能写 http(s)://、只写域名端口、
-   *   或漏了 /mqtt 路径。统一成 ws(s)://host[:port]/mqtt，方便 frp 用户
-   *   直接粘「http://公网IP:端口」也能用。空串 / 非法 → 返回 ''。
+   * ★ 中继地址规范化：玩家可以只写「IP:端口」或「域名」，协议前缀完全省略：
+   *   · 页面是 https → 自动用 wss://（否则浏览器按混合内容拦掉）
+   *   · 页面是 http / 不知道 → 用 ws://
+   *   也接受 http(s):// 粘贴；顺手粘的 /mqtt 不再自动补（自建 broker 根路径就是
+   *   WS 端点），显式写了路径则保留。空串 / 非法 → 返回 ''。
    */
-  Net.normalizeBrokerUrl = function (raw) {
+  Net.normalizeBrokerUrl = function (raw, pageProtocol) {
     let s = String(raw == null ? '' : raw).trim();
     if (!s) return '';
+    const isHttpsPage = String(pageProtocol || '').toLowerCase() === 'https:';
     if (/^wss?:\/\//i.test(s)) { /* 已是 ws 协议 */ }
     else if (/^https?:\/\//i.test(s)) s = s.replace(/^http/i, 'ws');
     else if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) return '';
-    else s = 'ws://' + s;
+    else s = (isHttpsPage ? 'wss://' : 'ws://') + s;
     s = s.replace(/\/+$/, '');
     const m = s.match(/^(wss?):\/\/([^/?#]+)(\/[^?#]*)?(\?.*)?$/i);
     if (!m || !m[2]) return '';
     const pathPart = m[3] || '';
     const query = m[4] || '';
-    // EMQX 要求 /mqtt；自建 broker 任意路径都收，所以统一补上不冲突
-    if (!pathPart || pathPart === '/') return m[1] + '://' + m[2] + '/mqtt' + query;
+    // 根路径 / 不写路径 → 直接用 host[:port]；显式写了 /mqtt 之类则保留
+    if (!pathPart || pathPart === '/') return m[1] + '://' + m[2] + query;
     return s;
   };
 
@@ -276,7 +279,7 @@
     if (!u) return '';
     if (/^wss:\/\//i.test(u)) return '';
     if (!/^ws:\/\//i.test(u)) {
-      return '中继地址格式不对，应形如 ws://1.2.3.4:6080/mqtt';
+      return '中继地址格式不对，应形如 ws://1.2.3.4:6080';
     }
     if (String(pageProtocol || '').toLowerCase() !== 'https:') return '';
     const m = u.match(/^ws:\/\/([^/?#]+)/i);
