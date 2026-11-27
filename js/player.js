@@ -94,6 +94,8 @@
       this.char = character;
       this.isHuman = !!isHuman;
       this.name = character.name;
+      // ★ 昵称：联机房间 / 局内角色框上方显示；单机与 AI 为空（不显示）
+      this.nickname = '';
       this.maxHp = character.maxHp;
       this.hp = character.maxHp;
       this.gender = character.gender || 'male';  // 【雌雄双股剑】异性判定

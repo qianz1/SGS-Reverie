@@ -26,33 +26,105 @@
   const CFG_KEY = 'sgs_net_cfg_v1';
 
   /* ================= 配置 ================= */
-  // ★ 固定公共 broker，不再让用户输入地址；P2P 打不通时游戏帧也经它转发
-  //   （公网中继兜底），所以这里既是信令地址也是中继地址。
+  // ★ 默认走公共 broker；P2P 打不通时游戏帧也经它转发（公网中继兜底），
+  //   所以这里既是信令地址也是中继地址。
+  // ★ 想完全自建（frp 内网穿透）时，在联机面板里填自建地址即可：
+  //   房主电脑跑 `node server/broker.js 8080`，frpc 把 8080 映射到公网，
+  //   玩家填 ws://公网IP:端口/mqtt（直接粘 http://IP:端口 也能自动纠正）。
   const DEFAULTS = {
-    brokerUrl: 'wss://broker-cn.emqx.io:8084/mqtt', appId: 'sanguosha'
+    brokerUrl: 'wss://broker-cn.emqx.io:8084/mqtt', appId: 'sanguosha',
+    token: ''
   };
   const Config = Net.Config = {
     DEFAULTS: DEFAULTS,
+    /** 空值 / 非法值一律丢掉，免得 localStorage 里一条空串把默认地址顶掉 */
+    _clean(obj) {
+      const out = {};
+      Object.keys(obj || {}).forEach((k) => {
+        const v = obj[k];
+        if (v == null || v === '') return;
+        if (k === 'brokerUrl') {
+          const n = Net.normalizeBrokerUrl(v);
+          if (n) out[k] = n;
+          return;
+        }
+        out[k] = v;
+      });
+      return out;
+    },
     load() {
       let saved = {};
       try { saved = JSON.parse(global.localStorage && global.localStorage.getItem(CFG_KEY) || '{}'); }
       catch (e) { saved = {}; }
       const url = Net.Config.fromUrl();
-      return Object.assign({}, DEFAULTS, saved, url);
+      return Object.assign({}, DEFAULTS,
+        Config._clean(saved), Config._clean(url));
     },
     save(cfg) {
+      const out = { appId: cfg.appId || 'sanguosha' };
+      // ★ 只把「非默认」的自建地址落盘：换回公共服务器时不该留下陈旧地址
+      if (cfg.brokerUrl && cfg.brokerUrl !== DEFAULTS.brokerUrl) {
+        const n = Net.normalizeBrokerUrl(cfg.brokerUrl);
+        if (n) out.brokerUrl = n;
+      }
+      if (cfg.token) out.token = String(cfg.token);
       try { global.localStorage && global.localStorage.setItem(CFG_KEY,
-        JSON.stringify({ appId: cfg.appId || 'sanguosha' })); } catch (e) {}
+        JSON.stringify(out)); } catch (e) {}
     },
     fromUrl() {
       const out = {};
       try {
         const q = new URLSearchParams(global.location ? global.location.search : '');
-        [['broker', 'brokerUrl'], ['appid', 'appId'], ['room', 'room']]
+        [['broker', 'brokerUrl'], ['appid', 'appId'], ['room', 'room'],
+         // ★ 自建中继口令：房主分享 /?token=xxx 时，客人打开就自带
+         ['token', 'token']]
           .forEach(([k, v]) => { if (q.get(k)) out[v] = q.get(k); });
       } catch (e) {}
       return out;
     }
+  };
+
+  /**
+   * ★ 中继连通性探测：联机面板的「测试」按钮用，也方便排障脚本直接调。
+   *   只完成一次 MQTT CONNECT 就断开，不发任何业务消息；
+   *   连不上 / 5 秒无响应都会给出可读原因（frp 没起、端口未放通、地址写错）。
+   */
+  Net.probeBroker = function (url, opts) {
+    opts = opts || {};
+    return new Promise((resolve) => {
+      const started = Date.now();
+      let done = false;
+      let client = null;
+      let timer = null;
+      const finish = (ok, error) => {
+        if (done) return;
+        done = true;
+        if (timer) { try { clearTimeout(timer); } catch (e) {} }
+        try { if (client) client.close(); } catch (e) {}
+        resolve({ ok: !!ok, ms: Date.now() - started, error: error || '', url: url });
+      };
+      if (!url) { finish(false, 'empty'); return; }
+      try {
+        client = new Net.MqttClient({
+          url: url,
+          clientId: 'sgs_probe_' + Math.random().toString(36).slice(2, 8),
+          username: opts.username || '', password: opts.password || '',
+          reconnectPeriod: 0, keepalive: 0,
+          WebSocketImpl: opts.WebSocketImpl ||
+            (typeof WebSocket !== 'undefined' ? WebSocket : null),
+          onState: (s, x) => {
+            if (s === 'connected') finish(true);
+            else if (s === 'error') finish(false, (x && (x.reason || x.code)) || 'socket');
+          }
+        });
+        client.connect();
+      } catch (e) {
+        finish(false, (e && e.message) || 'exception');
+        return;
+      }
+      timer = setTimeout(() => finish(false, 'timeout'), opts.timeout || 5000);
+      if (timer && typeof timer.unref === 'function') timer.unref();
+    });
   };
 
   /* ================= 决策路由 ================= */
@@ -85,6 +157,45 @@
     'closePeekPanel', 'closeTargetPanel'
   ];
   Net.FX_METHODS = FX_METHODS;
+
+  /**
+   * ★ 表现层广播器（1v1 / 2v2 共用）。
+   *   先推一份同事务快照，再对**每个远端座位**单独判定能否看正面并各发一份
+   *   fx。座位号是全局唯一的，因此这套判断与视角、人数、谁是房主都无关。
+   *
+   *   要求 session 提供：pushSnapshot(immediate) / recipientSeats() /
+   *   send(frame)（frame.to = 收件座位）。1v1 与 2v2 都是这个形状。
+   */
+  Net.makeBroadcast = function (session) {
+    return function (name, args) {
+      const safe = args.slice();
+      // animateDraw 的第 3 个参数是 Game，其余表现事件的第 3 个是 opts
+      const opts = (name !== 'animateDraw' && safe[2] &&
+        typeof safe[2] === 'object' && !Array.isArray(safe[2])) ? safe[2] : {};
+      const game = session.game;
+      const seats = P.fxFaceSeats(name, safe, {
+        localSeat: game && game.human ? game.human.seat : null,
+        remoteSeats: session.recipientSeats()
+      });
+      const toHand = name === 'animateDraw' ||
+        opts.dest === 'hand' || opts.dest === 'ai-hero';
+      const tx = ++session._tx;
+      session.pushSnapshot(true);
+      session.recipientSeats().forEach((seat) => {
+        const seeFace = P.canSeeFxFace(seat, seats.providerSeat,
+          seats.receiverSeat, seats.publicFace);
+        const hide = toHand ? !seeFace
+          : (!!opts.faceDown && !(seats.providerSeat != null &&
+              String(seats.providerSeat) === String(seat)));
+        const out = safe.slice();
+        if (hide && out[0]) out[0] = P.hideCardFaces(out[0]);
+        session.send({ t: 'fx', tx: tx, m: name, hide: !!hide,
+          recv: seats.receiverSeat, src: seats.providerSeat, to: seat,
+          pub: seats.publicFace ? 1 : 0,
+          a: P.packFxArgs(out, game, seat) });
+      });
+    };
+  };
 
   class RouterUI {
     constructor(localUI, remoteUI, broadcast) {
@@ -125,6 +236,18 @@
   Net.RouterUI = RouterUI;
 
   /* ================= 主机侧：远端玩家的 UI 代理 ================= */
+  /**
+   * ★ ask 的重传 / 兜底：MQTT 中继是「至多一次」，丢一帧就会让整桌人僵在
+   *   「等待 XX 操作」上（五谷丰登选不了牌、称象问不出来都是这个形态）。
+   *   做法：未收到 act 就按固定间隔重发同一帧（客机按 id 去重，不会重复执行）；
+   *   超过上限仍无响应则按「放弃 / 默认项」结算，宁可少一次收益，也不锁死对局。
+   *   两个常量可被自测覆盖成很小的值。
+   */
+  const ASK_RETRY_MS = 5000;
+  const ASK_MAX_TRIES = 4;
+  Net.ASK_RETRY_MS = ASK_RETRY_MS;
+  Net.ASK_MAX_TRIES = ASK_MAX_TRIES;
+
   class RemoteUI {
     constructor(session) {
       this.session = session;
@@ -154,22 +277,70 @@
       const self = this;
       return new Promise((resolve) => {
         const id = ++self.seq;
-        self.waiters[id] = resolve;
-        if (self.session.pushSnapshot) self.session.pushSnapshot(true);
-        self.session.send({
-          t: 'ask', id: id, method: method,
+        const frame = {
+          t: 'ask', id: id, method: method, to: self.remoteSeat,
           args: P.packArgs(Array.prototype.slice.call(args), self.game, self.remoteSeat)
-        });
+        };
+        const rec = { id: id, resolve: resolve, timer: null, tries: 0 };
+        self.waiters[id] = rec;
+        if (self.session.pushSnapshot) self.session.pushSnapshot(true);
+        self.session.send(frame);
+        const retry = Math.max(0, Number(Net.ASK_RETRY_MS) || 0);
+        const maxTries = Math.max(1, Number(Net.ASK_MAX_TRIES) || 1);
+        if (!retry) return;
+        const tick = () => {
+          if (self.waiters[id] !== rec) return;      // 已收到 act
+          rec.tries++;
+          if (rec.tries > maxTries) {
+            delete self.waiters[id];
+            // ★ 主机放弃这一问：必须显式告诉客机把界面收掉。
+            //   否则客机那条 pending 永远停在原地，后面所有 ask 都排在它
+            //   后面，表现就是「主机靠超时自己往下走了，客机整局卡死」。
+            try {
+              self.session.send({ t: 'askAbort', id: id, to: self.remoteSeat });
+            } catch (e) {}
+            // 兜底：按「不发动 / 不出牌 / 不选」结算，避免整桌卡死
+            try {
+              if (SGS.log) {
+                SGS.log('远端玩家（座位 ' + self.remoteSeat + '）超时未响应【' +
+                  method + '】，按放弃处理。', 'warn');
+              }
+            } catch (e) {}
+            resolve(fallbackAct(method, args));
+            return;
+          }
+          try { self.session.send(frame); } catch (e) {}
+          rec.timer = setTimeout(tick, retry);
+        };
+        rec.timer = setTimeout(tick, retry);
       });
     }
     onAct(id, value) {
-      const fn = this.waiters[id];
-      if (!fn) return;
+      const rec = this.waiters[id];
+      if (!rec) return;
       delete this.waiters[id];
-      fn(P.unpackAct(value, this.game));
+      if (rec.timer) clearTimeout(rec.timer);
+      const fn = rec.resolve || rec;
+      if (typeof fn === 'function') fn(P.unpackAct(value, this.game));
     }
   }
   Net.RemoteUI = RemoteUI;
+
+  /**
+   * 超时兜底值：尽量贴近「玩家什么都没做」时规则层能接受的形状。
+   *   waitPlay    → 结束出牌
+   *   waitDiscard → 空数组（规则层会再兜一层）
+   *   waitTargets / waitChainTargets → 空数组
+   *   其余（询问是否发动 / 打出 / 选牌）→ null = 放弃
+   */
+  function fallbackAct(method, args) {
+    if (method === 'waitPlay') return { type: 'end' };
+    if (method === 'waitDiscard' || method === 'waitTargets' ||
+        method === 'waitChainTargets' || method === 'waitReveal') return [];
+    if (method === 'waitWugu') return null;
+    return null;
+  }
+  Net.fallbackAct = fallbackAct;
 
   /* ================= 会话基类 ================= */
   class Session {
@@ -210,6 +381,7 @@
         brokerUrl: this.cfg.brokerUrl, appId: this.cfg.appId, room: this.room,
         role: this.role, username: this.cfg.username, password: this.cfg.password,
         WebSocketImpl: opts.WebSocketImpl,
+        helloExtra: opts.helloExtra || null,
         onState: (s, x) => self.onState('signal:' + s, x),
         onPresence: (m) => self.onState('presence', m),
         onSignal: (type, data) => self.onSignal(type, data),
@@ -407,11 +579,15 @@
     onFrame(m) {
       if (!m || !m.t) return;
       this._lastRx = Date.now();
+      // ★ 2v2 房间控制帧（welcome / room / pool / start / kick）交给子类处理，
+      //   不进入 1v1 的 switch；返回 true 表示已被消费。
+      if (typeof this.onRoomFrame === 'function' && this.onRoomFrame(m)) return;
       switch (m.t) {
         case 'char': this.onChar(m); break;
         case 'init': this.onInit(m); break;
         case 'snap': this.onSnap(m); break;
         case 'ask': this.onAsk(m); break;
+        case 'askAbort': this.onAskAbort(m); break;
         case 'act': this.onActFrame(m); break;
         case 'log': this.onLogFrame(m); break;
         case 'fx': this.onFxFrame(m); break;
@@ -421,7 +597,7 @@
       }
     }
     onChar() {} onInit() {} onSnap() {} onAsk() {} onFxFrame() {}
-    onActFrame() {} onOver() {}
+    onActFrame() {} onOver() {} onAskAbort() {}
     onLogFrame(m) {
       try { if (this.ui && typeof this.ui.log === 'function') this.ui.log(m.m, m.c); }
       catch (e) {}
@@ -480,52 +656,21 @@
       super.flushFrames();
       if (this._beginPending) { this._beginPending = false; this.maybeBegin(); }
     }
+    /**
+     * ★ 表现层广播器（1v1 / 2v2 共用）：
+     *   先推一份同事务快照，再对**每个远端座位**单独判定能否看正面并各发一份
+     *   fx。座位号是全局唯一的，因此这套判断与视角、人数、谁是房主都无关。
+     */
+    makeBroadcast() {
+      return Net.makeBroadcast(this);
+    }
+
     begin() {
       this.started = true;
       if (NetUI && NetUI.hideWait) { try { NetUI.hideWait(); } catch (e) {} }
       const ui = this.ui;
       const self0 = this;
-      const router = new RouterUI(ui, this.remoteUI, (name, args) => {
-        const safe = args.slice();
-        // animateDraw 的第 3 个参数是 Game，其余表现事件的第 3 个是 opts
-        const opts = (name !== 'animateDraw' && safe[2] &&
-          typeof safe[2] === 'object' && !Array.isArray(safe[2])) ? safe[2] : {};
-        const game = self0.game;
-        // ★★ 正反面的唯一口径：先提炼「提供者 / 获得者」座位，再对【每一个】
-        //   收件人单独判定能不能看正面（P.canSeeFxFace）。绝不「算一次就群发」——
-        //   多人局里那样必然串味：一份 frame 只能带一个 hide 标志，
-        //   而「能不能看正面」本来就是因人而异的。
-        //   座位号是全局唯一的，因此这条判断与视角、人数、谁是房主都无关。
-        const seats = P.fxFaceSeats(name, safe, {
-          localSeat: game && game.human ? game.human.seat : null,
-          remoteSeats: self0.recipientSeats()
-        });
-        const toHand = name === 'animateDraw' ||
-          opts.dest === 'hand' || opts.dest === 'ai-hero';
-        // ★ 同事务：先推一份当前权威快照，再发 fx。DataChannel 可靠有序，
-        //   客机一定先应用视图状态、再重放动画，不会被随后到达的快照重建打断。
-        const tx = ++self0._tx;
-        self0.pushSnapshot(true);
-        self0.recipientSeats().forEach((seat) => {
-          const seeFace = P.canSeeFxFace(seat, seats.providerSeat,
-            seats.receiverSeat, seats.publicFace);
-          // 进手牌区（摸牌 / 获得牌）：只有提供者与获得者看正面，其余人一律牌背。
-          // 展示区亮牌 / 弃牌（没有获得者）：沿用 opts.faceDown 声明，
-          // 但提供者自己永远看正面 —— 他本来就知道这张牌是什么。
-          const hide = toHand ? !seeFace
-            : (!!opts.faceDown && !(seats.providerSeat != null &&
-                String(seats.providerSeat) === String(seat)));
-          // 每个收件人各自一份参数副本，牌面按需替换成牌背（互不影响）
-          const out = safe.slice();
-          if (hide && out[0]) out[0] = P.hideCardFaces(out[0]);
-          // ★ recv（获得者）+ src（提供者）随帧下发：客机拿这两个座位号
-          //   自己再判一次，不依赖任何坐标 / 落点约定，换视角也不会错。
-          self0.send({ t: 'fx', tx: tx, m: name, hide: !!hide,
-            recv: seats.receiverSeat, src: seats.providerSeat, to: seat,
-            pub: seats.publicFace ? 1 : 0,
-            a: P.packFxArgs(out, game, seat) });
-        });
-      });
+      const router = new RouterUI(ui, this.remoteUI, this.makeBroadcast());
       const game = new SGS.Game(ui, this.myCharId, {
         mode: '1v1', remote: true, remoteCharId: this.remoteCharId,
         uiRouter: router
@@ -543,6 +688,9 @@
       // ★ 每次状态渲染都推一次按座位裁剪的快照（合并 24ms 内的连续 render）
       ui.onRender = () => self.pushSnapshot();
       ui.onLog = (m, c) => self.send({ t: 'log', m: m, c: c });
+      // ★ 战斗 BGM：主机在真正建好对局（begin）时启动，而不是选将 / 建房时。
+      //   若浏览器拦截自动播放，Audio 层会在下一次点击时补播。
+      try { if (SGS.Audio && SGS.Audio.startBgm) SGS.Audio.startBgm(); } catch (e) {}
       this.sendInit();
       this.pushSnapshot(true);
       this.onState('game:start');
@@ -598,6 +746,12 @@
       super(Object.assign({ role: 'guest' }, opts));
       this.viewGame = P.makeViewGame(this.ui);
       this._askQueue = [];
+      // ★ ask 串行：同一时刻只允许一个「等待玩家操作」的界面，
+      //   后续 ask 排队处理；已答过的 id 记住答案，主机重传时直接补发。
+      this._askOpen = null;
+      this._askPending = [];
+      this._answered = {};
+      this._askWatch = null;
       // ★ 视图模式：UI 的所有 render（含 ask 触发的那些）都只做 keyed diff，
       //   不重建 #me-hand —— 这样飞牌替身 / FLIP 不会被半路打断。
       if (this.ui) this.ui._netView = true;
@@ -608,8 +762,16 @@
       NetUI.linkSuffix = NetUI.linkSuffix || '';
       this.hostCharId = m.hostCharId;
       this.viewGame.viewerSeat = m.seat;
+      // 新的一局：上一局的 ask 记录（id 从 1 重新计数）必须清掉，否则会误判成重传
+      this._askOpen = null;
+      this._askPending = [];
+      this._answered = {};
+      this._askWatch = null;
       this.ui.bindGame(this.viewGame);
       this.ui.vsAI = false;
+      // ★ 战斗 BGM：客机在收到 init（对局真正开始）时启动，
+      //   选将 / 房间阶段保持安静；被浏览器拦截则由 Audio 层等下一次点击补播。
+      try { if (SGS.Audio && SGS.Audio.startBgm) SGS.Audio.startBgm(); } catch (e) {}
       // 收到 init 时可能已有排队的快照/ask，按序补放
       const q = this._askQueue.splice(0);
       q.forEach((frame) => this.onFrame(frame));
@@ -719,15 +881,23 @@
       //     看起来就是摸牌没动画。显式指定从中央牌堆起飞才与主机一致。
       if (m.m === 'animateDraw') {
         const cards = args[0] || [], player = args[1];
-        const mine = m.recv != null ? seatIsMe(m.recv) : isMine(player);
+        // ★ 两个判据取「或」：帧上的 recv 是最权威的，视图 player 兜住旧主机
+        //   不带 recv / init 尚未拿到 mySeat 的窗口。任一成立都算「自己摸牌」，
+        //   否则自家摸牌会被误判成别人摸牌 → dest='ai-hero' → 跳过插入手牌
+        //   动画（表现就是「自己摸牌直接出现在手里，没有飞牌」）。
+        const mine = seatIsMe(m.recv) || isMine(player);
         const seatSee = seatSays(null, m.recv, false);
         // 摸牌没有提供者：只有获得者能看正面
         const face = (seatSee == null ? mine : seatSee) && !m.hide;
         cards.forEach((c, i) => {
           // ★ 多张按 1/3 卡宽错位、逐张错峰起飞，与主机 animateDrawToAI
           //   的「露出 1 / 盖住 2」叠放观感一致，不再几张完全重叠。
+          // ★ toPlayer 必须带上：dest='ai-hero' 的落点靠 heroEl(toPlayer) 取框。
+          //   少了它，2v2 里所有人摸牌都会飞向「屏幕最上方那张角色框」——
+          //   那是 1v1 时代 destEl 的回退值（$('ai-area')），四人局里全错。
           try { ui.flyCard(c, player, { from: 'table',
-            dest: mine ? 'hand' : 'ai-hero', faceDown: !face,
+            dest: mine ? 'hand' : 'ai-hero', toPlayer: player,
+            faceDown: !face,
             stackIndex: i, stackCount: cards.length, delay: i * 110 }); } catch (e) {
             if (typeof console !== 'undefined' && console.warn) {
               try { console.warn('[net] 摸牌飞牌失败', e); } catch (e2) {}
@@ -743,7 +913,8 @@
       if ((m.m === 'flyCard' || m.m === 'flyCards') && args[2] &&
           (args[2].dest === 'hand' || args[2].dest === 'ai-hero')) {
         const o = args[2];
-        const mine = m.recv != null ? seatIsMe(m.recv) : isMine(o.toPlayer);
+        // ★ 同样取「或」：帧上的 recv 优先，视图里的获得者兜底
+        const mine = seatIsMe(m.recv) || isMine(o.toPlayer);
         // ★ 全场公开的牌（五谷亮牌 / 装备区·判定区明牌）→ 谁都能看正面。
         //   优先读帧上的 pub（主机已按区域 faceUp 判好），再退回参数里的 public。
         const isPub = m.pub != null ? !!m.pub : !!o.public;
@@ -806,23 +977,133 @@
     onAsk(m) {
       // init 之前的 ask 先排队，避免 viewGame 还没建好
       if (!this.mySeat) { this._askQueue.push(m); return; }
+      if (!m || m.id == null) return;
+      // ★ 主机重传同一条 ask：已经答过就原样重发答案，不再弹一次界面
+      if (this._answered &&
+          Object.prototype.hasOwnProperty.call(this._answered, m.id)) {
+        this.send({ t: 'act', id: m.id, value: this._answered[m.id] });
+        return;
+      }
+      // 正在等这个 id 的答案（重复帧）→ 忽略
+      if (this._askOpen && this._askOpen.id === m.id) return;
+      // ★ 上一条 ask 的界面已经不存在了（面板被 fx / 快照收起、pending 被
+      //   覆盖）：视为那一问已作废，直接释放单槽，别让它永久堵住队列。
+      if (this._askOpen && (!this.ui || !this.ui.pending)) {
+        this._clearAskWatch();
+        this._askOpen = null;
+      }
+      // ★ 上一条 ask 还没答完：排队，绝不能直接覆盖 —— 直接覆盖会让前一个
+      //   Promise 永远悬着，主机一直等那一步，表现就是「全员卡死」。
+      if (this._askOpen) { this._askPending.push(m); return; }
+      this._runAsk(m);
+    }
+
+    /** 主机已放弃某一问（超时）：收起客机界面并放行队列，绝不回 act */
+    onAskAbort(m) {
+      if (!m) return;
+      const id = m.id;
+      if (this._askPending && this._askPending.length) {
+        this._askPending = this._askPending.filter((f) => f.id !== id);
+      }
+      if (!this._askOpen) return;
+      if (id != null && this._askOpen.id !== id) return;
+      this._clearAskWatch();
+      this._askOpen = null;
+      if (SGS.log) SGS.log('主机已放弃这一问，界面自动收起。', 'warn');
+      try {
+        if (this.ui && typeof this.ui.cancelPending === 'function') {
+          this.ui.cancelPending();
+        } else if (this.ui) {
+          this.ui.pending = null;
+          if (this.ui.refreshActions) this.ui.refreshActions();
+        }
+      } catch (e) { /* 界面收起失败也不能堵住队列 */ }
+      const next = this._askPending.shift();
+      if (next) this._runAsk(next);
+    }
+
+    _clearAskWatch() {
+      if (this._askWatch) {
+        try { clearTimeout(this._askWatch); } catch (e) {}
+        this._askWatch = null;
+      }
+    }
+
+    /** 真正把一条 ask 交给本地 UI，并接管它的 resolve（答完立刻上送） */
+    _runAsk(m) {
+      const self = this;
       const ui = this.ui;
       const fn = ui && ui[m.method];
-      if (typeof fn !== 'function') { this.send({ t: 'act', id: m.id, value: null }); return; }
-      const args = P.unpackArgs(m.args, this.viewGame);
-      fn.apply(ui, args);
-      const pd = ui.pending;
-      if (!pd || !pd.resolve) { this.send({ t: 'act', id: m.id, value: null }); return; }
-      const orig = pd.resolve;
-      const self = this;
-      // ★ 本地 finish() 照常清理界面，同时把最终动作上送给权威端
-      pd.resolve = (v) => {
-        orig(v);
-        self.send({ t: 'act', id: m.id, value: P.packAct(v) });
+      this._askOpen = { id: m.id, method: m.method };
+      // ★ 看门狗：askAbort 帧本身也可能在公共 broker 上丢掉。若这一问
+      //   超过「主机重试上限 × 2」还没有结果，客机自己也把界面收掉，
+      //   否则后面每一条 ask 都会永久排队（超时兜底只救了主机）。
+      const retry = Math.max(0, Number(Net.ASK_RETRY_MS) || 0);
+      const maxTries = Math.max(1, Number(Net.ASK_MAX_TRIES) || 1);
+      const limit = retry ? Math.max(30000, retry * maxTries * 2) : 0;
+      this._clearAskWatch();
+      if (limit) {
+        this._askWatch = setTimeout(() => {
+          if (!self._askOpen || self._askOpen.id !== m.id) return;
+          self._askWatch = null;
+          self._askOpen = null;
+          try {
+            if (self.ui && typeof self.ui.cancelPending === 'function') {
+              self.ui.cancelPending();
+            } else if (self.ui) {
+              self.ui.pending = null;
+            }
+          } catch (e) {}
+          if (SGS.log) SGS.log('这一问长时间没有结果，已自动收起。', 'warn');
+          const next = self._askPending.shift();
+          if (next) self._runAsk(next);
+        }, limit);
+        // Node 自测里别让这个定时器拖住进程
+        if (this._askWatch && typeof this._askWatch.unref === 'function') {
+          this._askWatch.unref();
+        }
+      }
+      const finishAsk = (value) => {
+        if (!self._askOpen || self._askOpen.id !== m.id) return;
+        self._askOpen = null;
+        self._clearAskWatch();
+        const packed = P.packAct(value);
+        if (!self._answered) self._answered = {};
+        self._answered[m.id] = packed;
+        const keys = Object.keys(self._answered);
+        if (keys.length > 40) {
+          keys.slice(0, keys.length - 40).forEach((k) => { delete self._answered[k]; });
+        }
+        self.send({ t: 'act', id: m.id, value: packed });
+        const next = self._askPending.shift();
+        if (next) self._runAsk(next);
       };
+      if (typeof fn !== 'function') { finishAsk(null); return; }
+      let args;
+      try { args = P.unpackArgs(m.args, this.viewGame); }
+      catch (e) { finishAsk(null); return; }
+      try { fn.apply(ui, args); }
+      catch (e) {
+        if (typeof console !== 'undefined' && console.warn) {
+          try { console.warn('[net] ask 界面异常：' + m.method, e); } catch (e2) {}
+        }
+        finishAsk(null);
+        return;
+      }
+      const pd = ui.pending;
+      if (!pd || typeof pd.resolve !== 'function') {
+        // 界面没留住 pending（例如本端暂时无法操作）→ 立刻按放弃回传，
+        // 让主机继续往下走，而不是干等一个永远不会有结果的询问。
+        finishAsk(null);
+        return;
+      }
+      const orig = pd.resolve;
+      pd.resolve = (v) => { orig(v); finishAsk(v); };
     }
     onOver(m) {
-      try { this.ui.showGameOver(!m.hostWon); } catch (e) {}
+      // ★ 2v2 是「阵营胜」，不能再用「房主是否获胜」反推 —— 主机直接下发 win。
+      const win = (m && m.win != null) ? !!m.win : !(m && m.hostWon);
+      try { this.ui.showGameOver(win, this.viewGame); } catch (e) {}
       this.onState('game:over');
     }
   }
@@ -852,6 +1133,37 @@
   Net.randomRoom = randomRoom;
 
   const NetUI = Net.UI = {
+    /** 当前模式（1v1 / 2v2）：联机入口按模式分开显示，互不干扰 */
+    mode: '1v1',
+    /** 切换联机面板的模式（由选将界面在进入时调用） */
+    setMode(mode) {
+      this.mode = (mode === '2v2') ? '2v2' : '1v1';
+      const doc = global.document;
+      if (!doc || !doc.getElementById) return;
+      const bar = doc.getElementById('net-bar');
+      if (bar && bar.classList) {
+        bar.classList.toggle('mode-1v1', this.mode === '1v1');
+        bar.classList.toggle('mode-2v2', this.mode === '2v2');
+      }
+      const toggle = doc.getElementById('net-toggle');
+      if (toggle) {
+        const tip = this.mode === '2v2'
+          ? '联机组队 <em>▼</em>' : '联机单挑 <em>▼</em>';
+        toggle.innerHTML = '<span class="net-dot"></span>' + tip;
+      }
+      const host = doc.getElementById('net-host');
+      if (host) host.textContent = '创建 1v1 房间';
+      const join = doc.getElementById('net-join');
+      if (join) join.textContent = '加入 1v1 房间';
+      const host2 = doc.getElementById('net-room-host');
+      if (host2) host2.textContent = '创建 2v2 房间';
+      const join2 = doc.getElementById('net-room-join');
+      if (join2) join2.textContent = '加入 2v2 房间';
+      const tipEl = doc.getElementById('net-row-tip');
+      if (tipEl) tipEl.textContent = '一对一 · 单挑对决';
+      const tip2 = doc.getElementById('net-row-tip-2v2');
+      if (tip2) tip2.textContent = '四人组队 · 队友手牌互看';
+    },
     /** 挂进 #start-screen；返回 controller */
     attach(ui) {
       const screen = global.document && global.document.getElementById
@@ -862,23 +1174,49 @@
       const bar = global.document.createElement('div');
       bar.id = 'net-bar';
       bar.className = 'net-bar';
+      // ★ 入口按模式彻底分开：单挑模式只渲染 1v1 的「创建 / 加入」两个按钮，
+      //   组队模式只渲染 2v2 的「创建 / 加入」两个按钮 —— 是两套独立 DOM，
+      //   不是同一对按钮改文案。房间号输入框是两者共用的（最上面一行），
+      //   切换模式时内容不丢。
       bar.innerHTML =
         '<button id="net-toggle" class="net-toggle" type="button">' +
-          '<span class="net-dot"></span>联机对战 <em>▼</em></button>' +
+          '<span class="net-dot"></span>联机单挑 <em>▼</em></button>' +
         '<div id="net-body" class="net-body hidden">' +
-          '<div class="net-row net-actions">' +
+          '<div class="net-row net-room-row">' +
             '<label class="net-fld net-fld-room"><span>房间号</span>' +
               '<input id="net-room" spellcheck="false" maxlength="12" ' +
               'placeholder="6 位房间码" value="' + esc(cfg.room || '') + '"></label>' +
-            '<button id="net-host" class="net-btn primary" type="button">创建房间</button>' +
-            '<button id="net-join" class="net-btn" type="button">加入房间</button>' +
+            '<span class="net-room-tip">留空则自动生成</span>' +
           '</div>' +
+          '<div class="net-row net-actions net-row-1v1">' +
+            '<button id="net-host" class="net-btn primary" type="button">创建 1v1 房间</button>' +
+            '<button id="net-join" class="net-btn" type="button">加入 1v1 房间</button>' +
+            '<span id="net-row-tip" class="net-row-tip">一对一 · 单挑对决</span>' +
+          '</div>' +
+          '<div class="net-row net-actions net-row-2v2">' +
+            '<button id="net-room-host" class="net-btn primary" type="button">创建 2v2 房间</button>' +
+            '<button id="net-room-join" class="net-btn" type="button">加入 2v2 房间</button>' +
+            '<span id="net-row-tip-2v2" class="net-row-tip">四人组队 · 队友手牌互看</span>' +
+          '</div>' +
+          '<div class="net-row net-broker-row">' +
+            '<label class="net-fld net-fld-broker"><span>中继服务器（留空 = 公共服务器）</span>' +
+              '<input id="net-broker" spellcheck="false" ' +
+              'placeholder="ws://公网IP:端口/mqtt" value="' +
+              esc(cfg.brokerUrl && cfg.brokerUrl !== DEFAULTS.brokerUrl
+                ? cfg.brokerUrl : '') + '"></label>' +
+            '<button id="net-broker-test" class="net-btn ghost" type="button">测试</button>' +
+          '</div>' +
+          '<div id="net-broker-tip" class="net-broker-tip">' +
+            '自己开服：房主电脑运行 node server/broker.js 8080，' +
+            '再用 frp（自建或第三方 TCP 隧道）映射该端口，' +
+            '这里填 ws://公网地址:端口/mqtt</div>' +
           '<div id="net-status" class="net-status"><i></i><span>未连接 · 默认本地 AI 对战</span></div>' +
         '</div>';
       const tools = global.document.getElementById('pick-tools') ||
         (screen.querySelector ? screen.querySelector('.pick-tools') : null);
       if (tools && tools.parentNode) tools.parentNode.insertBefore(bar, tools);
       else screen.insertBefore(bar, screen.firstChild);
+      NetUI.setMode(NetUI.mode);
 
       const $ = (id) => global.document.getElementById(id);
       const toggle = $('net-toggle'), body = $('net-body');
@@ -902,13 +1240,108 @@
           if (ri) ri.textContent = '房间 ' + (NetUI.roomCode || '') + ' · ' + full;
         }
       };
-      const readCfg = () => ({
-        brokerUrl: cfg.brokerUrl || DEFAULTS.brokerUrl,
-        appId: cfg.appId || 'sanguosha',
-        room: ($('net-room') || {}).value || ''
-      });
+      /* ---------- 中继服务器：自建（frp）/ 公共 ---------- */
+      const brokerInput = $('net-broker');
+      const brokerTip = $('net-broker-tip');
+      const brokerRaw = () => String((brokerInput && brokerInput.value) || '').trim();
+      /** 读地址：空 = 公共；非法 / https 页面连 ws:// 都明确报错，绝不静默退回公共 */
+      const brokerOf = () => {
+        const raw = brokerRaw();
+        if (!raw) return { url: DEFAULTS.brokerUrl, custom: false, error: '' };
+        const url = Net.normalizeBrokerUrl(raw);
+        if (!url) {
+          return { url: '', custom: true,
+            error: '中继地址格式不对，应形如 ws://1.2.3.4:6080/mqtt' };
+        }
+        const pageProto = (global.location || {}).protocol || '';
+        const bad = Net.brokerUrlProblem(url, pageProto);
+        if (bad) return { url: url, custom: true, error: bad };
+        return { url: url, custom: true, error: '' };
+      };
+
+      const readCfg = () => {
+        const b = brokerOf();
+        return {
+          brokerUrl: b.url || DEFAULTS.brokerUrl,
+          appId: cfg.appId || 'sanguosha',
+          // ★ 自建中继口令（URL 上的 ?token= 或 localStorage 里带下来的）
+          token: cfg.token || '',
+          username: cfg.token || '',
+          password: cfg.token || '',
+          room: ($('net-room') || {}).value || ''
+        };
+      };
+
+      // 测试按钮：真正连一次，报告耗时 / 失败原因（frp 没通时最有用）
+      const testBtn = $('net-broker-test');
+      if (testBtn && testBtn.addEventListener) {
+        testBtn.addEventListener('click', () => {
+          const b = brokerOf();
+          if (b.error) { state(b.error, 'err'); return; }
+          const url = b.url;
+          state('正在测试 ' + url + ' …');
+          Net.probeBroker(url, {
+            username: cfg.token || '', password: cfg.token || ''
+          }).then((r) => {
+            // ★ https 页面 + wss：浏览器对「自签证书」的 WSS 不给点继续的机会，
+            //   失败时补一句，避免误判成 frpc 没通。
+            const tlsHint = (/^wss:\/\//i.test(url) &&
+              ((global.location || {}).protocol || '') === 'https:')
+              ? '；若服务器用自签证书，浏览器会直接拒绝 WSS，需要受信任证书'
+              : '';
+            if (r.ok) state('中继可用 · ' + url + ' · ' + r.ms + ' ms', 'ok');
+            else if (r.error === 'timeout') {
+              state('中继无响应（5 秒超时）· 检查 frpc 是否在线' + tlsHint, 'err');
+            } else {
+              state('中继连不上（' + r.error + '）· 检查 frpc 是否在线 / 端口是否放通' +
+                tlsHint, 'err');
+            }
+          });
+        });
+      }
+
+      /* ---------- 页面由自建中继托管时，自动填同源地址 ---------- */
+      //   ★ 只有「没有存过自建地址」才自动填，绝不覆盖玩家手填的值。
+      //     frp 映射后客人打开 http://公网IP:端口/ 也是同一套逻辑，零配置。
+      const autoDetect = () => {
+        if (brokerRaw()) return;
+        const loc = global.location || {};
+        if (!/^https?:$/.test(loc.protocol || '')) return;   // file:// 不探
+        if (typeof global.fetch !== 'function') return;
+        try {
+          global.fetch('/__sgs/broker', { cache: 'no-store' })
+            .then((r) => (r && r.ok ? r.json() : null))
+            .then((j) => {
+              if (!j || !j.ws || brokerRaw()) return;
+              // ★ 反代没带 X-Forwarded-Proto 时，服务端会误判成 http；
+              //   以「页面自己的协议」为准再兜一层：https 页面强制 wss。
+              const wsUrl = Net.brokerUrlForPage(j.ws,
+                (global.location || {}).protocol || '');
+              if (brokerInput) brokerInput.value = wsUrl;
+              cfg.brokerUrl = wsUrl;
+              if (brokerTip) {
+                brokerTip.className = 'net-broker-tip ok';
+                brokerTip.textContent = '已检测到自建中继 ' + wsUrl +
+                  ' · 把本页网址发给队友即可（frp 映射后同样自动识别）';
+              }
+            })
+            .catch(() => {});
+        } catch (e) { /* 探测失败就继续用公共服务器 */ }
+      };
+      autoDetect();
+      // https 页面（例如 Pages 托管）浏览器只允许 wss://，提前说清楚
+      if (((global.location || {}).protocol || '') === 'https:' && brokerTip &&
+          !brokerRaw()) {
+        brokerTip.className = 'net-broker-tip';
+        brokerTip.textContent = '当前页面是 https：自建中继必须用 wss://' +
+          '（frp 的 HTTPS 隧道 / 带证书），ws:// 会被浏览器拦截；' +
+          '也可直接用 http 打开中继托管的页面。';
+      }
+
       const start = (role) => {
         NetUI.linkSuffix = '';      // 换房间时清掉上一局的链路结论
+        const b = brokerOf();
+        if (b.error) { state(b.error, 'err'); return; }
         const c = readCfg();
         if (role === 'host' && !c.room) { c.room = randomRoom(); $('net-room').value = c.room; }
         if (role === 'guest' && !c.room) { state('请填写要加入的房间码', 'err'); return; }
@@ -919,6 +1352,9 @@
           onState: (s) => {
             let txt = LABEL[s] || s;
             if (s === 'game:start') txt = '对局开始 · 你是一号位吗请看座位号';
+            if (s === 'signal:error' && b.custom) {
+              txt = '自建中继连不上 · 检查 frpc 是否在线、端口是否放通';
+            }
             state(txt, /error|失败|断开/.test(txt) ? 'err'
               : /open|relay|start|init|joined/.test(s) ? 'ok' : '');
           },
@@ -937,13 +1373,52 @@
         sess.start();
       };
 
+      // ★ 2v2：单独的四人房间（星形中继，不做 P2P），打开房间大厅
+      const openRoom = (role) => {
+        const b = brokerOf();
+        if (b.error) { state(b.error, 'err'); return; }
+        const c = readCfg();
+        if (role === 'host' && !c.room) { c.room = randomRoom(); $('net-room').value = c.room; }
+        if (role === 'guest' && !c.room) { state('请填写要加入的房间码', 'err'); return; }
+        if (typeof Net.createRoom !== 'function') { state('房间模块未加载', 'err'); return; }
+        if (sessionRef.current) { try { sessionRef.current.close(); } catch (e) {} }
+        Config.save(c);
+        // ★ 不在进房间时播 BGM：等真正开局（RoomHostSession.beginGame /
+        //   客机 onInit）再启动，房间与选将阶段保持安静。
+        const store = Net.RoomStore || { nick: () => '', avatar: () => '' };
+        const sess = Net.createRoom(role, {
+          ui: ui, cfg: c, room: c.room,
+          nick: store.nick(), avatar: store.avatar(),
+          onState: (s, x) => {
+            if (s === 'room:open') state(role === 'host'
+              ? '房间 ' + c.room + ' 已创建，把房间码发给队友' : '正在连接房主…');
+            else if (s === 'room:join') state('队友已加入', 'ok');
+            else if (s === 'room:leave') state('队友离开房间');
+            else if (s === 'room:picking') state('选将中 · 队伍将池 5 选 1', 'ok');
+            else if (s === 'game:start') state('对局开始', 'ok');
+            else if (s === 'game:init') state('对局已同步', 'ok');
+            else if (/error|失败|断开/.test(String(s))) state(LABEL[s] || s, 'err');
+          }
+        });
+        sessionRef.current = sess;
+        ui._pickNetInfo = null;
+        sess.start();
+      };
+      NetUI.openRoom = openRoom;
+
       if (toggle && toggle.addEventListener) {
         toggle.addEventListener('click', () => {
           if (body) body.classList.toggle('hidden');
           toggle.classList.toggle('open');
         });
       }
-      [['net-host', () => start('host')], ['net-join', () => start('guest')]]
+      // ★ 两套入口各自固定职责，互不混用：
+      //   1v1 走 HostSession / GuestSession（P2P + 中继兜底）；
+      //   2v2 走四人房间（星形中继，打开房间大厅）。
+      [['net-host', () => start('host')],
+       ['net-join', () => start('guest')],
+       ['net-room-host', () => openRoom('host')],
+       ['net-room-join', () => openRoom('guest')]]
         .forEach(([id, fn]) => {
         const b = $(id); if (b && b.addEventListener) b.addEventListener('click', fn);
       });

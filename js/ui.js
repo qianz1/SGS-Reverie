@@ -322,21 +322,27 @@
         });
       }
 
+      // ★ 2v2 的另外两个角色框（右侧 / 左侧）用 #ai-area 的结构克隆出来
+      this.buildSeatFrames();
+
       // 目标选择：点击高亮的角色卡确定目标（多人局按 data-player 扩展）
       // ★ 角色介绍改为「长按期间弹出、松手关闭」；hover 弹出仍由 CSS 负责。
       //   click 只负责选目标，不再切换 info-open；选目标期间长按也不弹介绍。
-      ['ai-area', 'me-area'].forEach((id) => {
+      this.seatFrameIds().forEach((id) => {
         const el = $(id);
         if (!el || !el.addEventListener) return;
         el.addEventListener('click', () => {
           this.onHeroClick(el.dataset.player);
           // 兜底：清掉异常残留的浮层（正常路径松手时已经关掉）
-          const other = $(id === 'ai-area' ? 'me-area' : 'ai-area');
-          if (other && other.classList) other.classList.remove('info-open');
+          this.seatFrameIds().forEach((otherId) => {
+            if (otherId === id) return;
+            const other = $(otherId);
+            if (other && other.classList) other.classList.remove('info-open');
+          });
           if (el.classList) el.classList.remove('info-open');
         });
         this.bindHoldInfo(el, {
-          group: () => [$('ai-area'), $('me-area')],
+          group: () => this.seatFrameIds().map((x) => $(x)),
           guard: () => {
             const mode = this.pending && this.pending.mode;
             return mode === 'target' || mode === 'targets' ||
@@ -344,6 +350,30 @@
           }
         });
       });
+
+      // ★ 队友手牌数（角色框左下角）可点：弹出只读手牌面板
+      this.seatFrameIds().forEach((id) => {
+        const cnt = $(id.replace('-area', '-count'));
+        if (!cnt || !cnt.addEventListener) return;
+        cnt.addEventListener('click', (e) => {
+          // ★ 选目标期间点击手牌数仍算「点这张角色卡」：不能吞掉事件，
+          //   否则队友框的选目标区域会被这块小数字挖掉一个洞。
+          const mode = this.pending && this.pending.mode;
+          if (mode === 'target' || mode === 'targets' || mode === 'chainTargets') return;
+          if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
+          this.onTeamCountClick(id.replace('-area', ''));
+        });
+      });
+      // 面板：点遮罩 / 【关闭】收起（面板内容会重绘，用事件委托只绑一次）
+      const teamPanel = $('team-hand-panel');
+      if (teamPanel && teamPanel.addEventListener) {
+        teamPanel.addEventListener('click', (e) => {
+          const t = e.target;
+          if (t === teamPanel || (t && t.id === 'team-hand-close')) {
+            this.hideTeamHand();
+          }
+        });
+      }
 
       // 装备区：点玩家自己的「武器」栏发动【丈八蛇矛】主动转化
       const eqBox = $('me-equip-area');
@@ -587,7 +617,9 @@
      * 兜底时长必须大于动画时长，否则末段淡出还没播完就被硬移除。
      */
     showSkillBanner(player, name) {
-      const host = $(player && player.isHuman ? 'me-skill-banner' : 'ai-skill-banner');
+      const key2 = (player && player.uiKey) || (player && player.isHuman ? 'me' : 'ai');
+      const host = $(key2 + '-skill-banner') ||
+        $(player && player.isHuman ? 'me-skill-banner' : 'ai-skill-banner');
       if (!host || typeof document === 'undefined') return;
       host.innerHTML = '';
       const b = document.createElement('div');
@@ -642,6 +674,13 @@
           }
           // ★ 选将界面的角色框用同一套立绘：素材晚到时重绘一次立即切到图片
           if (typeof self.renderCharPicker === 'function') self.renderCharPicker();
+          // ★ 2v2 队伍选将面板同理：立绘晚到时重绘一次，不要停在棕色卡面
+          try {
+            if (SGS.Net && SGS.Net.RoomUI && SGS.Net.RoomUI._pick &&
+                typeof SGS.Net.RoomUI.renderPick === 'function') {
+              SGS.Net.RoomUI.renderPick();
+            }
+          } catch (e) { /* 未进入房间 */ }
         };
         img.onerror = () => { /* 保持 CSS 绘制，无需处理 */ };
         img.src = url;
@@ -933,6 +972,11 @@
     showModeScreen(onEnter) {
       const screen = $('mode-screen');
       if (!screen) { if (onEnter) onEnter('1v1'); return; }
+      // ★ 从选将界面「返回主界面」时会再次进入本方法：回调改为存起来复用，
+      //   点击监听只绑一次，避免多次往返后一按按钮开好几局。
+      this._modeEnter = onEnter || this._modeEnter;
+      if (this._modeBound) return;
+      this._modeBound = true;
       this.probeStartBackground();
       const btns = (typeof screen.querySelectorAll === 'function')
         ? screen.querySelectorAll('.mode-item') : [];
@@ -940,13 +984,14 @@
         if (!btn || typeof btn.addEventListener !== 'function') return;
         btn.addEventListener('click', () => {
           const mode = (btn.dataset && btn.dataset.mode) || '';
-          if (mode !== '1v1') {
+          if (mode !== '1v1' && mode !== '2v2') {
             this.showModeToast('【' + (MODE_LABELS[mode] || '该模式') +
               '】暂未开放，敬请期待');
             return;
           }
           if (screen.classList) screen.classList.add('leaving');
-          if (onEnter) onEnter(mode);
+          const enter = this._modeEnter;
+          if (enter) enter(mode);
           const hide = () => { if (screen.classList) screen.classList.add('hidden'); };
           if (typeof setTimeout === 'function') setTimeout(hide, 300);
           else hide();
@@ -962,9 +1007,22 @@
      *   · 点「选择此将」按钮 → 隐藏选将层并回调 onPick(角色 id)。
      * 立绘探测结果晚到时由 probeArt() 调 renderCharPicker() 重绘一次。
      */
-    showStartScreen(onPick) {
+    showStartScreen(onPick, mode) {
       const sc = $('start-screen');
       if (sc && sc.classList) sc.classList.remove('hidden');
+      // ★ 模式决定联机面板显示哪一套入口（单挑 1v1 / 组队 2v2），
+      //   以及下方那句说明文案；两种模式的入口互不混用。
+      this._pickMode = (mode === '2v2') ? '2v2' : '1v1';
+      if (SGS.Net && SGS.Net.UI && typeof SGS.Net.UI.setMode === 'function') {
+        try { SGS.Net.UI.setMode(this._pickMode); } catch (e) { /* 面板未挂载 */ }
+      }
+      const subEl = (typeof document !== 'undefined' && document.querySelector)
+        ? document.querySelector('.start-sub') : null;
+      if (subEl) {
+        subEl.textContent = this._pickMode === '2v2'
+          ? '其余三名角色由 AI 或联机队友执掌 \u00A0·\u00A0 一四号位 VS 二三号位'
+          : '另一位武将由 AI 或联机对手执掌 \u00A0·\u00A0 体力先归零的一方落败';
+      }
       this._pickChars = Object.keys(SGS.Characters)
         .map((k) => SGS.Characters[k]);
       this._pickOnPick = onPick;
@@ -974,6 +1032,7 @@
       this._pickQuery = '';
       this._pickRendered = false;
       this.bindPickTools();
+      this.bindPickBack();
       // 重复进入选将界面时，工具栏也同步回到「全」+ 空搜索
       const input0 = $('pick-search');
       const wrap0 = $('pick-search-wrap');
@@ -988,6 +1047,30 @@
         }
       });
       this.renderCharPicker();
+    }
+
+    /** 选将界面「返回主界面」：只隐藏选将层，不创建任何对局 */
+    bindPickBack() {
+      if (this._pickBackBound) return;
+      const btn = $('btn-pick-back');
+      if (!btn || typeof btn.addEventListener !== 'function') return;
+      this._pickBackBound = true;
+      btn.addEventListener('click', () => {
+        // 关掉可能正在进行的联机面板 / 挑选状态，避免残留
+        if (this._pickNetInfo) this._pickNetInfo = null;
+        const sc = $('start-screen');
+        if (sc && sc.classList) sc.classList.add('hidden');
+        this.backToModeScreen();
+      });
+    }
+
+    /** 回到开局主界面（模式选择），供选将界面返回按钮使用 */
+    backToModeScreen() {
+      const screen = $('mode-screen');
+      if (!screen || !screen.classList) return;
+      screen.classList.remove('hidden');
+      screen.classList.remove('leaving');
+      this.probeStartBackground();
     }
 
     /** 绑定势力按钮 / 搜索框 / 清空按钮（工具栏是静态 DOM，只绑一次） */
@@ -1073,6 +1156,48 @@
       });
     }
 
+    /**
+     * ★ 单个「选将角色框」的 HTML：与局内 .hero-card 完全同款
+     *   （立绘 / 势力纯文字 / 竖排名字 / 体力圆点 + x/y / 角色信息浮层）。
+     *   单机选将与 2v2 队伍选将共用这一个生成器，保证两处外观一模一样，
+     *   悬停 / 长按都能看到技能介绍。
+     * @param {object} c    角色数据（characters/*.js 导出对象）
+     * @param {object} opts { cls: 追加的类名 }
+     */
+    pickHeroHTML(c, opts) {
+      opts = opts || {};
+      // ★ 不再等 probeArt() 的结果：角色文件路径可以同步算出来，直接写进
+      //   <img>。2v2 队伍选将是在房间点「开始游戏」后立刻弹出的，如果这时
+      //   probeArt 还没跑完（或某张图探测失败后没有重试），art.characters
+      //   里没有这个 id，旧逻辑就完全不插 <img>，角色框看起来就是黑的。
+      //   路径写错/文件缺失时由 bindArtEvents 的 error 分支隐藏图片并撤掉
+      //   has-art，自动回退到 CSS 卡面，不会比原来更差。
+      let artUrl = this.art.characters[c.id] || '';
+      if (!artUrl && SGS.characterImageFile) {
+        const file = SGS.characterImageFile(c);
+        if (file) artUrl = 'assets/characters/' + file;
+      }
+      const shown = displayNameOf(c);
+      const len = Math.max(1, shown.length);
+      const faction = c.faction || '群';
+      // 伪 player：满体力 / 空手牌，供 hpHTML 与 heroInfoHTML 复用局内渲染
+      const pseudo = { char: c, name: c.name, hp: c.maxHp,
+                       maxHp: c.maxHp, hand: [] };
+      return '<div class="hero-card pick-hero' + (artUrl ? ' has-art' : '') +
+          (opts.cls ? ' ' + opts.cls : '') + '"' +
+          ' data-id="' + escText(c.id) + '"' +
+          ' style="--name-scale:' + (1 / len).toFixed(4) +
+          ';--hp-pips:' + Math.max(1, c.maxHp || 1) + '">' +
+          (artUrl ? '<img class="hero-art" src="' + escText(artUrl) + '" alt="">' : '') +
+          '<div class="hero-faction" data-faction="' + escText(faction) + '">' +
+            escText(faction) + '</div>' +
+          '<div class="hero-name">' + escText(shown) + '</div>' +
+          '<div class="hero-hp">' + this.hpHTML(pseudo) + '</div>' +
+          '<div class="hero-info">' +
+            this.heroInfoHTML(pseudo, { noHand: true }) + '</div>' +
+        '</div>';
+    }
+
     /** 生成 / 重绘选将角色框（过滤、图片晚到时重入；重建 DOM 后重新绑定事件） */
     renderCharPicker() {
       if (!this._pickChars || typeof document === 'undefined') return;
@@ -1115,26 +1240,8 @@
 
       if (sc && sc.classList) sc.classList.remove('pick-is-empty');
       box.innerHTML = chars.map((c) => {
-        const artUrl = this.art.characters[c.id] || '';
-        const shown = displayNameOf(c);
-        const len = Math.max(1, shown.length);
-        const faction = c.faction || '群';
-        // 伪 player：满体力 / 空手牌，供 hpHTML 与 heroInfoHTML 复用局内渲染
-        const pseudo = { char: c, name: c.name, hp: c.maxHp,
-                         maxHp: c.maxHp, hand: [] };
         return '<div class="pick-slot" data-id="' + escText(c.id) + '">' +
-          '<div class="hero-card pick-hero' + (artUrl ? ' has-art' : '') + '"' +
-            ' data-id="' + escText(c.id) + '"' +
-            ' style="--name-scale:' + (1 / len).toFixed(4) +
-            ';--hp-pips:' + Math.max(1, c.maxHp || 1) + '">' +
-            (artUrl ? '<img class="hero-art" src="' + escText(artUrl) + '" alt="">' : '') +
-            '<div class="hero-faction" data-faction="' + escText(faction) + '">' +
-              escText(faction) + '</div>' +
-            '<div class="hero-name">' + escText(shown) + '</div>' +
-            '<div class="hero-hp">' + this.hpHTML(pseudo) + '</div>' +
-            '<div class="hero-info">' +
-              this.heroInfoHTML(pseudo, { noHand: true }) + '</div>' +
-          '</div>' +
+          this.pickHeroHTML(c) +
           '<button class="pick-btn" data-id="' + escText(c.id) + '" type="button">' +
             '选择此将 <em>→</em></button>' +
         '</div>';
@@ -1306,6 +1413,9 @@
       if (!handEl) return;
       handEl.style.setProperty('--hand-overlap', '0px');
       handEl.classList.toggle('stacked', count > 8);
+      // ★ 层级：叠放时每一张按顺序递增（后一张盖住前一张），未叠放时清空内联值。
+      //   悬停 / 选中的牌由 CSS 用 !important 拉到最上层（见 .hand .card:hover）。
+      this.syncHandZIndex(count);
       if (!count || count <= 8 || typeof document.createElement !== 'function') return;
 
       // 用隐藏探针量取卡牌「未收缩」时的自然宽度（不受 flex 压缩影响）
@@ -1328,6 +1438,36 @@
       const step = (avail - cardW) / (count - 1);
       const overlap = Math.min(0, Math.floor(step - cardW - gap));
       handEl.style.setProperty('--hand-overlap', overlap + 'px');
+    }
+
+    /**
+     * ★ 手牌叠放层级：按 DOM 顺序写 inline z-index（1..n），后一张压在前一张上，
+     *   与「负 margin 向左叠」的视觉方向一致。
+     *   不叠放（<= 8 张）时清掉内联值，让 .card.sel 那套默认层级继续生效。
+     *   悬停 / 选中态由 CSS 的 !important 拉到最上层，不会被两侧邻居盖住。
+     */
+    syncHandZIndex(count) {
+      const handEl = $('me-hand');
+      if (!handEl) return;
+      const stacked = (count || 0) > 8;
+      let nodes = [];
+      try {
+        if (typeof document.querySelectorAll === 'function') {
+          nodes = Array.prototype.slice.call(
+            document.querySelectorAll('#me-hand .card'));
+        }
+      } catch (e) { nodes = []; }
+      if (!nodes.length && handEl.children) nodes = Array.prototype.slice.call(handEl.children);
+      nodes.forEach((el, i) => {
+        if (!el || !el.style) return;
+        // ★ 选中 / 刚选中的牌直接给更高的内联值与 CSS 兜底：不把「能否置顶」
+        //   押在一条 !important 是否还在上，也避免 hover 与选中同档时按 DOM
+        //   顺序被右侧邻居盖住。
+        const boosted = !!(el.classList &&
+          (el.classList.contains('sel') || el.classList.contains('picked')));
+        if (stacked) el.style.zIndex = String((boosted ? 1000 : 0) + i + 1);
+        else el.style.zIndex = boosted ? '999' : '';
+      });
     }
 
     /* ---------------- 手牌自动 FLIP（render 内置） ---------------- */
@@ -1630,7 +1770,6 @@
     /** 渲染玩家装备区（手牌区左侧四横栏）与其他角色框内的迷你装备栏 */
     renderEquips(game) {
       const me = game.human;
-      const ai = game.aiPlayer;
 
       const mine = $('me-equip-area');
       if (mine) {
@@ -1677,19 +1816,23 @@
       }
 
       // 其他角色：只列出已装备的槽（没装就不显示），全空时整块隐藏
-      const box = $('ai-equips');
-      if (box) {
-        const rows = SGS.EQUIP_SLOTS.filter((s) => ai.equips && ai.equips[s.key]);
-        box.innerHTML = rows.map((s) =>
-          '<div class="eq-mini-row" data-slot="' + s.key + '">' +
-          this.equipInfoHTML(ai.equips[s.key], true) + '</div>'
-        ).join('');
-        if (box.classList) box.classList.toggle('hidden', rows.length === 0);
-      }
-      const aiCard = $('ai-area');
-      if (aiCard && aiCard.classList) {
-        aiCard.classList.toggle('has-equips', SGS.Equipment.count(ai) > 0);
-      }
+      // ★ 2v2 有 3 个对手框，按 uiKey 逐个渲染
+      game.players.forEach((p) => {
+        if (p === me || !p.uiKey) return;
+        const box = $(p.uiKey + '-equips');
+        if (box) {
+          const rows = SGS.EQUIP_SLOTS.filter((s) => p.equips && p.equips[s.key]);
+          box.innerHTML = rows.map((s) =>
+            '<div class="eq-mini-row" data-slot="' + s.key + '">' +
+            this.equipInfoHTML(p.equips[s.key], true) + '</div>'
+          ).join('');
+          if (box.classList) box.classList.toggle('hidden', rows.length === 0);
+        }
+        const card = $(p.uiKey + '-area');
+        if (card && card.classList) {
+          card.classList.toggle('has-equips', SGS.Equipment.count(p) > 0);
+        }
+      });
     }
 
     /**
@@ -1755,7 +1898,157 @@
      * 单个角色框的渲染（名字 / 体力 / 手牌数 / 势力 / 立绘 / 信息浮层）。
      * 从 render() 里抽出来，供客机差量渲染只刷新真正变化的那一侧。
      */
+    /* ---------------- 2v2：四席角色框 ---------------- */
+
+    /** 局内四个角色框的 DOM id（1v1 时后两个不存在，遍历自动跳过） */
+    seatFrameIds() {
+      return ['me-area', 'ai-area', 'p2-area', 'p3-area'];
+    }
+
+    /**
+     * ★ 克隆 #ai-area 的结构，补出右侧 / 左侧两个角色框。
+     *   所有 id 前缀 ai- 改成 p2- / p3-，渲染路径（renderSide / 飞牌 /
+     *   受击 / 技能大字 / 目标连线）就能按 uiKey 找到各自的框。
+     */
+    buildSeatFrames() {
+      const tpl = $('ai-area');
+      const app = $('app');
+      if (!tpl || !app || typeof tpl.cloneNode !== 'function') return;
+      ['p2', 'p3'].forEach((key) => {
+        if ($(key + '-area')) return;
+        const node = tpl.cloneNode(true);
+        node.id = key + '-area';
+        node.dataset.player = key;
+        if (node.classList) {
+          ['acting', 'targetable', 'target-picked', 'info-open',
+           'has-art', 'has-equips', 'hit', 'side-left', 'side-right']
+            .forEach((c) => node.classList.remove(c));
+        }
+        if (typeof node.querySelectorAll === 'function') {
+          Array.prototype.forEach.call(node.querySelectorAll('[id]'), (el) => {
+            el.id = String(el.id).replace(/^ai-/, key + '-');
+          });
+        }
+        app.appendChild(node);
+      });
+      const left = $('p3-area');
+      if (left && left.classList) left.classList.add('side-left');
+      const right = $('p2-area');
+      if (right && right.classList) right.classList.add('side-right');
+    }
+
+    /**
+     * 分配给每个角色一个角色框 key：
+     *   1v1 → me（右下）/ ai（正上），与原来完全一致；
+     *   2v2 → me（右下）/ p2（右）/ ai（上）/ p3（左），
+     *         以自己为准按号位逆时针：自己 → 右手边 → 正上方 → 左手边。
+     */
+    assignUiKeys(game) {
+      const list = (game && game.players) || [];
+      list.forEach((p) => { p.uiKey = null; });
+      if (!game || !game.human) return;
+      game.human.uiKey = 'me';
+      if (list.length <= 2) {
+        if (game.aiPlayer) game.aiPlayer.uiKey = 'ai';
+        return;
+      }
+      const n = list.length;
+      const h = Math.max(0, list.indexOf(game.human));
+      list[(h + 1) % n].uiKey = 'p2';
+      list[(h + 2) % n].uiKey = 'ai';
+      list[(h + 3) % n].uiKey = 'p3';
+    }
+
+    /** 该角色对应的角色框元素（无框时返回 null） */
+    heroEl(player) {
+      if (!player) return null;
+      // ★ 兜底：uiKey 还没分配（旧调用 / 快照路径遗漏）时先补一次，
+      //   否则调用方会静默回退到 #ai-area —— 表现为「所有人都飞向最上方」。
+      if (!player.uiKey && this.game && this.game.players &&
+          this.game.players.indexOf(player) >= 0) {
+        try { this.assignUiKeys(this.game); } catch (e) { /* 忽略 */ }
+      }
+      if (player.uiKey) return $(player.uiKey + '-area');
+      // 最后兜底：本地真人一定在右下，其余角色在没有 key 时不要抢用 #ai-area
+      return player.isHuman ? $('me-area') : null;
+    }
+
+    /** data-player 值 → 角色对象（点击角色框选目标用） */
+    playerByUiKey(key, game) {
+      const g = game || this.game || (this.pending && this.pending.game);
+      if (!g || !g.players) return null;
+      if (key === 'me') return g.human;
+      const hit = g.players.find((p) => p && p.uiKey === key);
+      if (hit) return hit;
+      if (key === 'ai') return g.aiPlayer || null;
+      return null;
+    }
+
+    /* ---------------- 2v2：查看队友手牌 ---------------- */
+
+    /** 这个角色框的手牌数是否可点（同阵营队友、且还活着） */
+    canPeekTeamHand(p) {
+      const g = this.game;
+      if (!g || !g.teamMode || !g.human || !p) return false;
+      if (g.over) return false;                       // 对局结束后不再提供查看
+      if (p === g.human) return false;
+      if (p.dead || p.isDead()) return false;
+      return !!(g.isTeammate && g.isTeammate(g.human, p));
+    }
+
+    /** 点击队友手牌数：开 / 关队友手牌面板 */
+    onTeamCountClick(key) {
+      const g = this.game || (this.pending && this.pending.game);
+      if (!g) return;
+      const p = this.playerByUiKey(key, g);
+      if (!this.canPeekTeamHand(p)) return;
+      if (this._teamHandOpen === p) { this.hideTeamHand(); return; }
+      this._teamHandOpen = p;
+      this.renderTeamHandPanel();
+    }
+
+    hideTeamHand() {
+      this._teamHandOpen = null;
+      this._teamHandSig = null;
+      const panel = $('team-hand-panel');
+      if (panel) {
+        panel.innerHTML = '';
+        if (panel.classList) panel.classList.add('hidden');
+      }
+    }
+
+    /** 重绘队友手牌面板（手牌变化时由 render 调用） */
+    renderTeamHandPanel() {
+      const panel = $('team-hand-panel');
+      if (!panel) return;
+      const p = this._teamHandOpen;
+      if (!p || !this.canPeekTeamHand(p)) {
+        if (p) this.hideTeamHand();
+        return;
+      }
+      const cards = (p.hand || []).filter(Boolean);
+      // 手牌没变就不重绘（render 会被动画高频调用，避免面板闪烁）
+      const sig = cards.map((c) => String(c.id)).join(',');
+      if (this._teamHandSig === sig && this._teamHandOpen === p &&
+          panel.classList && !panel.classList.contains('hidden')) return;
+      this._teamHandSig = sig;
+      const rows = cards.map((c) =>
+        '<div class="peek-card">' + this.cardHTML(c) + '</div>').join('');
+      panel.innerHTML =
+        '<div class="peek-title">' + escText(p.name) + ' 的手牌（' +
+          cards.length + ' 张）</div>' +
+        '<div class="peek-sub">同阵营队友手牌互相可见 · 点击空白处或【关闭】收起</div>' +
+        (rows
+          ? '<div class="peek-cards">' + rows + '</div>'
+          : '<div class="peek-empty">队友当前没有手牌</div>') +
+        '<div class="peek-actions">' +
+          '<button class="btn tiny" id="team-hand-close" type="button">关闭</button>' +
+        '</div>';
+      if (panel.classList) panel.classList.remove('hidden');
+    }
+
     renderSide(p, prefix) {
+      if (!p || !p.char) return;      // 自测假界面偶尔有空洞角色，跳过
       const faction = p.char.faction || '群';
       const shownName = displayNameOf(p);
       const nameEl = $(prefix + '-name');
@@ -1764,12 +2057,51 @@
       if (hpEl) hpEl.innerHTML = this.hpHTML(p);        // 体力点竖排（自上而下扣除）
       // 对手：角色卡左下角只写手牌张数数字；玩家：底部手牌区显示文字
       const cnt = $(prefix + '-count');
-      const countText = prefix === 'ai'
-        ? String(p.hand.length)
-        : '手牌 ' + p.hand.length + ' 张';
+      const countText = prefix === 'me'
+        ? '手牌 ' + p.hand.length + ' 张'
+        : String(p.hand.length);
       if (cnt && cnt.textContent !== countText) cnt.textContent = countText;
+      // ★ 队友的手牌数可点开「查看手牌」
+      if (cnt && cnt.classList) {
+        cnt.classList.toggle('clickable', this.canPeekTeamHand(p));
+        if (cnt.title !== undefined) {
+          cnt.title = this.canPeekTeamHand(p) ? '点击查看队友手牌' : '';
+        }
+      }
       const f = $(prefix + '-faction');
       if (f) { f.textContent = faction; f.dataset.faction = faction; }
+
+      // ★ 身份字：主 / 友（绿）、敌（红）。
+      //   1v1 不启用组队身份，保持原来的「主 / 敌」样式（不加颜色类）。
+      const g = this.game;
+      const teamMode = !!(g && g.teamMode);
+      const qEl = $(prefix + '-q');
+      if (qEl) {
+        const label = SGS.identityOf(g && g.human, p, teamMode);
+        if (qEl.textContent !== label) qEl.textContent = label;
+        if (qEl.classList) {
+          ['q-self', 'q-ally', 'q-enemy'].forEach((c) => qEl.classList.remove(c));
+          if (teamMode) {
+            qEl.classList.add(label === '主' ? 'q-self'
+              : label === '友' ? 'q-ally' : 'q-enemy');
+          }
+        }
+      }
+      // ★ 昵称：显示在角色框内部上方（势力与身份之间）；没有昵称时留空隐藏
+      const nickEl = $(prefix + '-nick');
+      if (nickEl) {
+        const nick = p.nickname || '';
+        if (nickEl.textContent !== nick) nickEl.textContent = nick;
+      }
+
+      // ★ 阵亡：角色框整体灰掉（去色 + 降低不透明度），并打上「阵亡」标记，
+      //   与存活角色一眼可分。用 player.dead（真阵亡）而不是 isDead()
+      //   （那等价于 hp <= 0，濒死途中也会命中）。
+      const cardEl = $(prefix + '-area');
+      if (cardEl && cardEl.classList) {
+        cardEl.classList.toggle('dead', !!p.dead && !p.isHuman);
+        cardEl.classList.toggle('dead-self', !!p.dead && !!p.isHuman);
+      }
 
       // 角色图片：探测成功才设置 src 并启用 has-art；失败保持 CSS 绘制。
       // 只在 src 变化时重设，避免每次 render 都重新加载 / 闪烁。
@@ -1878,6 +2210,16 @@
      */
     renderPatch(game, prev, snap) {
       if (!game || !snap || !game.human || !game.aiPlayer) return;
+      // ★ uiKey 是「角色 → 角色框」的唯一钥匙，只在 render() 里分配。
+      //   1v1 客机走的是本方法的「≤2 人」分支、从不进 render()，于是客机
+      //   视图里 uiKey 全是 undefined → heroEl() 返回 null → 所有飞牌落点
+      //   都回退到写死的 #ai-area（屏幕最上方那张框）。
+      //   这里先补一次分配，保证任何渲染路径都有可用的角色框。
+      this.assignUiKeys(game);
+      // ★ 4 人局（2v2）：这里的「增量」只写了 me / ai 两张卡，
+      //   直接走完整 render 更可靠；render 本身在 _netView 下对手牌仍是
+      //   keyed diff，不会打断飞牌 / FLIP。
+      if ((game.players || []).length > 2) { this.render(game); return; }
       const $ = (id) => (typeof document !== 'undefined' && document.getElementById)
         ? document.getElementById(id) : null;
       const setText = (id, v) => {
@@ -1951,21 +2293,40 @@
       const ai = game.aiPlayer;
       const pd = this.pending;
 
-      $('round-info').textContent = '第 ' + game.round + ' 轮 · ' +
-        (game.actor.isHuman ? '你的回合'
-          : (game.vsAI === false ? '对手回合' : 'AI 回合'));
+      // ★ 回合归属：2v2 要写清是谁的回合；自己阵亡后改为「观战中」。
+      const actor = game.actor || {};
+      let turnText;
+      if (me && me.dead) {
+        turnText = '观战中 · ' + (actor.name || '') + ' 的回合';
+      } else if (actor.isHuman) {
+        turnText = '你的回合';
+      } else if (game.players && game.players.length > 2) {
+        turnText = (actor.name || '对手') + ' 的回合';
+      } else {
+        turnText = game.vsAI === false ? '对手回合' : 'AI 回合';
+      }
+      $('round-info').textContent = '第 ' + game.round + ' 轮 · ' + turnText;
       $('deck-info').textContent = '牌堆 ' + game.deck.remaining + ' 张 / 弃牌 ' +
         (game.deck.discardPile ? game.deck.discardPile.length : 0) + ' 张';
 
-      this.renderSide(ai, 'ai');
-      this.renderSide(me, 'me');
+      // ★ 四个角色框：key 由「相对自己的号位」决定（2v2 时共四席）
+      this.assignUiKeys(game);
+      // 1v1 只有两位：右侧 / 左侧两个框隐藏，不占位也不显示空框
+      ['p2-area', 'p3-area'].forEach((id) => {
+        const el = $(id);
+        if (el && el.classList) el.classList.toggle('hidden', game.players.length < 4);
+      });
+      game.players.forEach((p) => this.renderSide(p, p.uiKey || 'ai'));
       this.renderEquips(game);   // 玩家四栏装备区 + 其他角色框内迷你装备栏
 
       // 判定区图标：玩家在底部手牌区左上方的独立区域，其他角色在角色框下边框
       const meJudge = $('me-judge-marks');
       if (meJudge) meJudge.innerHTML = this.judgeMarkHTML(me);
-      const aiJudge = $('ai-judge');
-      if (aiJudge) aiJudge.innerHTML = this.judgeMarkHTML(ai);
+      game.players.forEach((p) => {
+        if (p === me || !p.uiKey) return;
+        const box = $(p.uiKey + '-judge');
+        if (box) box.innerHTML = this.judgeMarkHTML(p);
+      });
 
       // 行动顺序序号：一号位先手，其余按逆时针（players 数组顺序）。
       // ★ 1v1 座次随机后也显示，否则玩家看不出为什么这局是对手先动；
@@ -1973,10 +2334,13 @@
       //   用数组下标兜底，将来往 players 里插入其他玩家时序号仍自动成立。
       const seatOf = (p) => p.seat || (game.players.indexOf(p) + 1);
       const showSeats = game.players.length > 1;
-      $('ai-seat').textContent = showSeats ? SGS.seatLabel(seatOf(ai)) : '';
-      $('me-seat').textContent = showSeats ? SGS.seatLabel(seatOf(me)) : '';
+      game.players.forEach((p) => {
+        if (!p.uiKey) return;
+        const el = $(p.uiKey + '-seat');
+        if (el) el.textContent = showSeats ? SGS.seatLabel(seatOf(p)) : '';
+      });
 
-      // 目标选择：只有合法目标角色卡会高亮可点（1v1 下即对方那张）。
+      // 目标选择：只有合法目标角色卡会高亮可点。
       // ★ 借刀杀人的「一次选两名」：第一次高亮有武器的目标；选定后
       //   立刻改为高亮该目标的【杀】合法目标（含使用者自己的角色框）。
       let targetable = [];
@@ -1988,13 +2352,15 @@
       } else if (pd && pd.mode === 'chainTargets') {
         targetable = pd.targets || [];   // ★ 铁索：所有角色（含自己）都高亮
       }
-      $('ai-area').classList.toggle('targetable', targetable.indexOf(ai) >= 0);
-      $('me-area').classList.toggle('targetable', targetable.indexOf(me) >= 0);
+      game.players.forEach((p) => {
+        const el = this.heroEl(p);
+        if (el && el.classList) el.classList.toggle('targetable', targetable.indexOf(p) >= 0);
+      });
       // ★ 需要多选目标的牌（借刀杀人 / 铁索连环 / 方天画戟…）：已选中的
       //   角色框改为「静态高亮 + 点击序号」，不再跟着合法目标的金色脉冲
       //   一起跳动，和还没选的目标一眼可分。序号即点击顺序（借刀两次
       //   点击、铁索 / 方天的目标顺序都以此为准）。
-      this.markPickedTargets(pd, ai, me);
+      this.markPickedTargets(pd, game.players);
       // ★ 目标选择期间角色介绍一律不弹（连 hover 也由 CSS 压住），
       //   并清掉上一步点击残留的 info-open，避免浮层盖住目标高亮。
       const selecting = !!pd && (pd.mode === 'target' || pd.mode === 'targets' ||
@@ -2002,19 +2368,21 @@
       const app = $('app');
       if (app && app.classList) app.classList.toggle('selecting-target', selecting);
       if (selecting) {
-        $('ai-area').classList.remove('info-open');
-        $('me-area').classList.remove('info-open');
+        game.players.forEach((p) => {
+          const el = this.heroEl(p);
+          if (el && el.classList) el.classList.remove('info-open');
+        });
       }
 
       // ★ 铁索连环：连环状态（横置）在角色框正中间画一条横向锁链
-      const aiChain = $('ai-chain'), meChain = $('me-chain');
-      if (aiChain && aiChain.classList) aiChain.classList.toggle('hidden', !ai.chained);
-      if (meChain && meChain.classList) meChain.classList.toggle('hidden', !me.chained);
-
       // ★ 翻面：武将牌背面朝上时，在立绘之上叠一层半透明牌背（back.webp）
-      const aiFlip = $('ai-flip'), meFlip = $('me-flip');
-      if (aiFlip && aiFlip.classList) aiFlip.classList.toggle('hidden', !ai.flipped);
-      if (meFlip && meFlip.classList) meFlip.classList.toggle('hidden', !me.flipped);
+      game.players.forEach((p) => {
+        if (!p.uiKey) return;
+        const chain = $(p.uiKey + '-chain');
+        if (chain && chain.classList) chain.classList.toggle('hidden', !p.chained);
+        const flip = $(p.uiKey + '-flip');
+        if (flip && flip.classList) flip.classList.toggle('hidden', !p.flipped);
+      });
 
       // 玩家手牌：出牌 / 技能选牌 / 响应选闪 / 弃牌共用同一套高亮与刚选中动画。
       // justPicked 只标记本次新选中的那张，避免每次重绘时已选卡牌一起重播动画。
@@ -2088,8 +2456,13 @@
       this.clearPredictMovers();
 
       // 当前行动方描边
-      $('ai-area').classList.toggle('acting', game.actor === ai);
-      $('me-area').classList.toggle('acting', game.actor === me);
+      game.players.forEach((p) => {
+        const el = this.heroEl(p);
+        if (el && el.classList) el.classList.toggle('acting', game.actor === p);
+      });
+      // ★ 队友手牌面板：开着的时候跟着手牌变化刷新（手牌没变就不重绘 DOM）
+      if (this._teamHandOpen) this.renderTeamHandPanel();
+
       // 顶栏开关显隐（角色确定 / 联机视角变化后才会真正改 DOM）
       this.syncOptions(game);
     }
@@ -2408,7 +2781,9 @@
 
       const R = (el) => el && typeof el.getBoundingClientRect === 'function'
         ? el.getBoundingClientRect() : null;
-      const hero = R($(fromPlayer && fromPlayer.isHuman ? 'me-area' : 'ai-area')) || R(app);
+      // ★ 2v2 有四个角色框：按角色自己的 uiKey 取框（1v1 仍是 me / ai）
+      const hero = R(this.heroEl(fromPlayer)) ||
+        R($(fromPlayer && fromPlayer.isHuman ? 'me-area' : 'ai-area')) || R(app);
 
       // 来源：自己用/打出的牌从手牌区（优先精确那张）出发；其他角色从角色框出发。
       // opts.from==='hero' 用于被拆 / 被牵的牌，强制从目标角色框出发；
@@ -2434,7 +2809,7 @@
               ));
             }
           } catch (e) { mini = null; }
-          src = mini || R($('ai-area')) || hero;
+          src = mini || R(this.heroEl(fromPlayer)) || R($('ai-area')) || hero;
         }
       } else if (fromHand) {
         let handCard = null;
@@ -2458,7 +2833,7 @@
       // （AI 手牌没有独立区域，用角色框代表其手牌）；
       // 'equip' = 装备牌飞向对应装备槽；其余一律飞向展示区中央。
       const destEl = dest === 'hand' ? ($('me-hand') || $('me-area'))
-        : dest === 'ai-hero' ? $('ai-area')
+        : dest === 'ai-hero' ? (this.heroEl(opts.toPlayer) || $('ai-area'))
         : dest === 'equip' ? ($('me-equip-area') || $('table-card'))
         : $('table-card');
       const dRect = R(destEl) || R(app);
@@ -2579,7 +2954,7 @@
           toLeft = r.left + (r.width - w) / 2;
           toTop = r.top + (r.height - h) / 2;
         } else {
-          const r = R($('ai-area')) || dRect;
+          const r = R(this.heroEl(tp)) || R($('ai-area')) || dRect;
           toLeft = r.left + r.width * 0.62 - w / 2;
           toTop = r.top + r.height * 0.72 - h / 2;
         }
@@ -2988,7 +3363,7 @@
       const src = R($('table-card')) || R(app);           // 起点：展示区中央
       const destEl = player && player.isHuman
         ? ($('me-hand') || $('me-area'))
-        : $('ai-area');                                   // AI 用角色框代表手牌
+        : (this.heroEl(player) || $('ai-area'));           // AI 用角色框代表手牌
       const dest = R(destEl) || R(app);
       if (!src || !src.width || !dest || !dest.width) return Promise.resolve();
 
@@ -3433,9 +3808,21 @@
         this.setActions(list, { noSkillPlaceholder: true });
 
       } else if (pd.mode === 'reveal') {
-        // 亮牌多选（【称象】）：确认 / 不获得都在亮牌面板底部，操作区只提示。
-        this.setActions([{ label: '请在亮牌面板中选择…', disabled: true }],
-          { noSkillPlaceholder: true });
+        // 亮牌多选（【称象】）：面板底部有【获得 / 不获得】，但操作区也保留
+        // 同一组按钮 —— 面板可能被联机 fx / 快照收起，只靠面板会让这一问
+        // 永远答不了（客机卡死）。两个入口走同一个 finish()。
+        const sel = pd.selected || [];
+        const chosen = (pd.cards || []).filter((c) => sel.indexOf(c.id) >= 0);
+        const over = this.sumPoints(chosen) > pd.limit;
+        this.setActions([
+          {
+            label: '获得' + (sel.length ? '（' + sel.length + ' 张）' : ''),
+            cls: 'primary',
+            disabled: over,
+            onClick: () => this.finish(sel.slice())
+          },
+          { label: '不获得', onClick: () => this.finish([]) }
+        ], { noSkillPlaceholder: true });
       }
     }
 
@@ -3829,11 +4216,11 @@
      *   targetable 也仍保留这个静态标记。
      *   每次 render 都整体重算，因此减选 / 取消会即时清掉。
      */
-    markPickedTargets(pd, ai, me) {
+    markPickedTargets(pd, players) {
       const picked = (pd && (pd.mode === 'targets' || pd.mode === 'chainTargets') &&
         Array.isArray(pd.picked)) ? pd.picked : [];
-      [['ai-area', ai], ['me-area', me]].forEach(([id, p]) => {
-        const el = $(id);
+      (players || []).forEach((p) => {
+        const el = this.heroEl(p);
         if (!el) return;
         const i = picked.indexOf(p);
         if (el.classList) {
@@ -3854,7 +4241,7 @@
 
     /** 清掉全部目标选择标记（finish / 取消 / 假界面重绘都走这里） */
     clearTargetPickMarks() {
-      ['ai-area', 'me-area'].forEach((id) => {
+      this.seatFrameIds().forEach((id) => {
         const el = $(id);
         if (!el) return;
         if (el.classList) {
@@ -3867,6 +4254,31 @@
       });
     }
 
+    /**
+     * ★ 作废当前等待（不 resolve、不产生玩家操作）：
+     *   联机里主机已经放弃这一问（超时 / 重传耗尽）时由客机调用，
+     *   把界面恢复到「没有询问」的状态，好让后面排队的 ask 继续。
+     *   与 finish() 的区别：finish 是玩家作答，本方法只是把界面收掉。
+     */
+    cancelPending() {
+      const pd = this.pending;
+      if (!pd) return false;
+      this.pending = null;
+      this.setHint('');
+      if (typeof this.clearTargetPickMarks === 'function') this.clearTargetPickMarks();
+      if (pd.mode === 'trick') this.closeTargetPanel();
+      if (pd.mode === 'peek') this.closePeekPanel();
+      if (pd.mode === 'reveal') {
+        if (this.publicReveal) this.renderRevealView();
+        else this.closeRevealPanel();
+      }
+      if (pd.mode === 'wugu') this.closeWuguPanel();
+      if (pd.mode === 'chainTargets') this.closeChainHint();
+      this.refreshActions();
+      if (this.game) { try { this.render(this.game); } catch (e) { /* 忽略 */ } }
+      return true;
+    }
+
     /** 结束当前等待并 resolve */
     finish(value) {
       const pd = this.pending;
@@ -3877,7 +4289,12 @@
       this.clearTargetPickMarks();
       if (pd.mode === 'trick') this.closeTargetPanel();
       if (pd.mode === 'peek') this.closePeekPanel();
-      if (pd.mode === 'reveal') this.closeRevealPanel();
+      // ★ 亮牌：如果还有公共亮牌面板，就切回只读版继续展示（让所有人看清
+      //   获得了哪几张），由技能自己稍后 closeRevealPanel；否则直接收起。
+      if (pd.mode === 'reveal') {
+        if (this.publicReveal) this.renderRevealView();
+        else this.closeRevealPanel();
+      }
       // ★ 五谷丰登面板从亮牌起一直保留到全部分配结束，不在单次选牌后关闭
       if (pd.mode === 'chainTargets') this.closeChainHint();
       this.refreshActions(); // 无 pending 时显示「等待中…」
@@ -3892,8 +4309,8 @@
       if (!pd || (pd.mode !== 'target' && pd.mode !== 'targets' &&
                   pd.mode !== 'chainTargets')) return;
       const g = pd.game;
-      // 当前 1v1 只有两张卡；多人局时把 data-player 映射到 game.players 即可
-      const p = key === 'ai' ? g.aiPlayer : (key === 'me' ? g.human : null);
+      // data-player → 角色：按 uiKey 反查（1v1 的 me / ai，2v2 再加 p2 / p3）
+      const p = this.playerByUiKey(key, g);
       if (!p) return;
 
       // ★ 借刀杀人：一次点两名，点击顺序决定「借刀目标 →【杀】目标」
@@ -3961,8 +4378,8 @@
     showTargetLine(fromPlayer, toPlayer, opts) {
       const app = $('app');
       if (!app || typeof document.createElement !== 'function') return false;
-      const fromEl = $(fromPlayer.isHuman ? 'me-area' : 'ai-area');
-      const toEl = $(toPlayer.isHuman ? 'me-area' : 'ai-area');
+      const fromEl = this.heroEl(fromPlayer) || $(fromPlayer.isHuman ? 'me-area' : 'ai-area');
+      const toEl = this.heroEl(toPlayer) || $(toPlayer.isHuman ? 'me-area' : 'ai-area');
       if (!fromEl || !toEl || !fromEl.getBoundingClientRect || !toEl.getBoundingClientRect) {
         return false; // 无布局环境（Node 自测）安全跳过
       }
@@ -4027,8 +4444,8 @@
       const n = Number(amount);
       if (!(n > 0) || typeof document.createElement !== 'function') return false;
       const isMe = !!player.isHuman;
-      const host = $(isMe ? 'me-hit-fx' : 'ai-hit-fx') ||
-                   $(isMe ? 'me-area' : 'ai-area');
+      const key = (player && player.uiKey) || (isMe ? 'me' : 'ai');
+      const host = $(key + '-hit-fx') || $(key + '-area');
       if (!host || typeof host.appendChild !== 'function') return false;
 
       const kind = dmgType === 'thunder' ? 'fx-thunder'
@@ -4084,7 +4501,8 @@
       if (amount != null && typeof this.showHitFX === 'function') {
         this.showHitFX(player, amount, dmgType);
       }
-      const el = $(player && player.isHuman ? 'me-area' : 'ai-area');
+      const el = this.heroEl(player) ||
+        $(player && player.isHuman ? 'me-area' : 'ai-area');
       if (!el || !el.classList) return false;
       el.classList.remove('hit');
       // 读一次布局属性强制浏览器应用「无 hit」状态，再重新加上以重播动画
@@ -4535,6 +4953,11 @@
         ? '轮到 ' + pd.player.name + ' 选择（第 ' + pd.index + '/' + pd.total +
           ' 位）· 点击一张牌直接获得'
         : '五谷丰登 · 亮出的牌';
+      // ★ 面板会先于「轮到谁选牌」亮出（无懈询问阶段就要让全场看到牌）。
+      //   此时本机可能正在回答【无懈可击】，牌还不能点：用 .waiting 明确
+      //   压暗牌面并拦住点击，避免「点了没反应 = 无法选牌」的错觉。
+      const waiting = !pd;
+      if (panel.classList) panel.classList.toggle('waiting', waiting);
       // ★ 底部状态条：规则层在每次无懈询问之前 setWuguTurn，所以这里
       //   始终显示「当前正在结算的目标」，全局 #hint 被面板挡住也不影响。
       const turn = s.turn
@@ -4559,6 +4982,15 @@
               '</div>';
           }).join('') +
         '</div>' +
+        (waiting
+          ? '<div class="wugu-wait">' +
+              (this.pending && this.pending.mode === 'wuxie'
+                ? '请先在上方处理【无懈可击】询问，再点牌选取'
+                : (s.turn
+                  ? '轮到 ' + escText(s.turn.name) + ' 选牌，暂不能点'
+                  : '等待轮到本机选牌…')) +
+            '</div>'
+          : '') +
         turn;
       panel.classList.remove('hidden');
     }
@@ -4566,7 +4998,18 @@
     /** 点五谷丰登面板里的牌：已拿走的牌不可再选 */
     onWuguCardClick(id) {
       const pd = this.pending;
-      if (!pd || pd.mode !== 'wugu') return;
+      // ★ 面板可能先于「轮到我选牌」亮出（先问无懈）：这时点牌不是选牌，
+      //   必须给出明确提示，不能静默 return —— 否则玩家会一直点牌，
+      //   主机一直等无懈答复，观感就是「无法选牌 / 全员卡死」。
+      if (pd && pd.mode === 'wuxie') {
+        this.log('五谷丰登的牌暂时不能选：请先在上方处理【无懈可击】询问。', 'warn');
+        this.setHint('请先处理【无懈可击】询问：使用 / 不使用 / 本轮不使用。');
+        return;
+      }
+      if (!pd || pd.mode !== 'wugu') {
+        this.log('现在还不能选五谷丰登的牌，请等待轮到你。', 'warn');
+        return;
+      }
       const s = this.wuguSession;
       if (!s || !s.cards.some((c) => c.id === id)) return;
       if (s.taken[id]) {
@@ -4686,6 +5129,12 @@
       this.publicReveal = null;
       const panel = $('reveal-panel');
       if (!panel) return;
+      // ★ 本机正在交互选牌（【称象】的 waitReveal 还没答完）时，绝不能把
+      //   交互面板关掉 —— 联机时主机的 closeRevealPanel 会作为 fx 广播过来，
+      //   一旦落在「客机还在选」的窗口里，客机就再也点不到【获得】，
+      //   这一问没答案 → 之后所有 ask 排队 → 全员卡死。
+      //   交互面板的关闭由 finish() 自己负责。
+      if (this.pending && this.pending.mode === 'reveal') return;
       panel.innerHTML = '';
       if (panel.classList) panel.classList.add('hidden');
     }
@@ -5015,6 +5464,10 @@
         hint: '【无懈可击】：请从手牌区点选一张【无懈可击】。',
         rejectHint: '只有【无懈可击】能用于这次响应。'
       }).then((id) => {
+        // ★ 选牌期间可能已经有新的 ask 到达并设置了新的 pending（联机重传 /
+        //   下一次询问）：绝不能把旧的无懈询问对象重新顶回去，否则新询问
+        //   被吞掉，主机永远等不到那一步，表现就是「全员卡死」。
+        if (this.pending && this.pending !== pd) return;
         // ★ waitPick 的确认/取消已经把自己的 pending 清掉了；这里要结束的是
         //   外层无懈询问。必须先把它恢复成当前 pending，否则 finish() 会
         //   因 this.pending 为 null 直接返回，外层 Promise 永远挂起。

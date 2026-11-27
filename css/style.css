@@ -1029,8 +1029,17 @@ body input, body textarea, body [contenteditable="true"] {
    鼠标悬停 / 选中的牌提到最上层，保证仍可点选。 */
 .hand.stacked .card { flex: 0 0 auto; }
 .hand .card + .card { margin-left: var(--hand-overlap); }
-.hand .card:hover { z-index: 1; }
-.hand .card.sel, .hand .card.picked { z-index: 3; }
+/* ★ 手牌叠放时的层级：
+   普通牌按从左到右递增（layoutHand 写 inline z-index），后一张盖住前一张；
+   但「鼠标悬停 / 选中 / 刚选中」的牌必须永远在最上层 —— 否则重叠过半时
+   它两侧邻居会把高亮效果整块盖住，看起来就是「点不中、选中了也看不见」。
+   inline z-index 优先级高于类选择器，所以这里必须 !important。
+   ★ hover 与选中必须分成两档：两者同值时按 DOM 顺序，鼠标扫过右侧邻居
+     时 DOM 靠后的邻居会盖住「已选中」的牌 —— 这正是「选中反而在最下层」
+     的另一半原因。选中 / 刚选中永远比 hover 高一档。 */
+.hand .card:hover { z-index: 999 !important; }
+.hand .card.sel,
+.hand .card.picked { z-index: 1000 !important; }
 
 /* ================= 玩家装备区（手牌区左侧，四条横栏） =================
    总高度比手牌区略高（--equip-extra-h），每栏一条横条，只显示花色 /
@@ -1230,7 +1239,10 @@ body input, body textarea, body [contenteditable="true"] {
   transform: translateY(calc(0px - var(--sel-lift)));
   outline: 2px solid var(--gold);
   box-shadow: 0 8px 16px rgba(217,178,106,.55);
-  z-index: 2;
+  /* 手牌区的叠放层级由 .hand .card.sel 的 !important 统一处理；
+     这里只是给非手牌场景一个安全值，不要再写成 2 —— 那会被手牌里的
+     内联 z-index（1..n）压住，造成「选中了反而在最下层」。 */
+  z-index: 1000;
 }
 /* 「刚选中」动画：只加在本次新选的那张牌上，三种选牌模式完全一致；
    弃牌换选时新牌播放同一动画，已选牌保持静态上浮，不会一起抖动。 */
@@ -1573,6 +1585,24 @@ body input, body textarea, body [contenteditable="true"] {
   overflow: hidden;
 }
 .wugu-panel.hidden { display: none; }
+/* ★ 面板已亮出、但本机还没轮到选牌（例如正在先回答【无懈可击】）：
+   压暗牌面 + 拦截点击，并显示一行原因，避免「点了没反应」被当成卡死。 */
+.wugu-panel.waiting .wugu-cards {
+  pointer-events: none;
+  opacity: .62;
+  filter: saturate(.55);
+}
+.wugu-panel.waiting .wugu-card { cursor: default; }
+.wugu-wait {
+  flex: 0 0 auto;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(240,205,130,.45);
+  background: rgba(10,8,6,.72);
+  color: #ffd9a0;
+  font-size: clamp(10px, 1.5vh, 13px);
+  letter-spacing: .06em;
+}
 .wugu-title {
   flex: 0 0 auto;
   color: #f0cf82;
@@ -2766,6 +2796,10 @@ body.allow-portrait .rotate-hint { display: none !important; }
 .net-body.hidden { display: none; }
 .net-row { display: flex; gap: clamp(8px, 1.4vw, 16px); align-items: flex-end;
   margin-top: clamp(6px, 1vh, 10px); flex-wrap: wrap; }
+/* ★ 1v1 / 2v2 是两套独立入口：模式决定显示哪一行，另一行整行不占位。 */
+.net-bar .net-row-1v1, .net-bar .net-row-2v2 { display: none; }
+.net-bar.mode-1v1 .net-row-1v1 { display: flex; }
+.net-bar.mode-2v2 .net-row-2v2 { display: flex; }
 .net-fld { display: flex; flex-direction: column; gap: 3px; flex: 1 1 220px; min-width: 0; }
 .net-fld-room { flex: 1 1 200px; }
 .net-fld-room input { letter-spacing: .18em; text-align: center; font-weight: 700; }
@@ -2783,6 +2817,16 @@ body.allow-portrait .rotate-hint { display: none !important; }
 .net-fld input:focus { border-color: #d9b26a;
   box-shadow: 0 0 0 2px rgba(217,178,106,.16); }
 .net-actions { align-items: flex-end; gap: clamp(8px, 1.2vw, 14px); }
+/* 自建中继（frp）：地址输入 + 测试；提示行是给「自己开服」的人看的 */
+.net-fld-broker { flex: 1 1 320px; }
+.net-fld-broker input { letter-spacing: 0; font-family: "Consolas", monospace; }
+.net-broker-row { align-items: flex-end; }
+.net-broker-tip {
+  margin-top: 4px;
+  font-size: clamp(9px, 1.2vh, 11px);
+  line-height: 1.45; color: #8d8272; letter-spacing: .02em;
+}
+.net-broker-tip.ok { color: #8fcfae; }
 .net-btn {
   padding: clamp(5px, .9vh, 8px) clamp(10px, 1.5vw, 18px);
   border: 1px solid rgba(217,178,106,.4); border-radius: 4px;
@@ -2819,4 +2863,577 @@ body.allow-portrait .rotate-hint { display: none !important; }
   .net-actions { flex-wrap: wrap; }
   .net-fld-room { flex: 1 1 100%; }
   .net-btn { flex: 1 1 40%; }
+}
+
+/* ==========================================================
+   2v2：四席角色框 / 身份字 / 昵称
+   ----------------------------------------------------------
+   · 四个框的位置：上方中间（ai）、右侧（p2）、左侧（p3）、右下（me）。
+   · 以当前玩家为准，按号位逆时针排布：自己（右下）→ 右侧 → 上方 → 左侧。
+   · 身份字样：主 / 友（绿）、敌（红）。昵称在框内上方，介于势力与身份之间。
+   ========================================================== */
+.hero-nick {
+  position: absolute;
+  top: 2px; left: 50%; transform: translateX(-50%);
+  max-width: 60%;
+  font-size: clamp(8px, 1.15vh, 10px);
+  line-height: 1.2;
+  letter-spacing: .02em;
+  color: #efe2c6;
+  text-shadow: 0 1px 3px rgba(0,0,0,.95);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  pointer-events: none;
+  z-index: 4;
+}
+.hero-nick:empty { display: none; }
+
+/* 身份字：绿 = 自己 / 同阵营，红 = 敌对 */
+.hero-card .hero-q.q-self,
+.hero-card .hero-q.q-ally {
+  color: #46d07a;
+  background: radial-gradient(circle at 35% 30%, rgba(24,44,30,.96), rgba(10,22,14,.96));
+  border-color: rgba(86,206,132,.85);
+  text-shadow: 0 0 6px rgba(70,208,122,.55);
+}
+.hero-card .hero-q.q-enemy {
+  color: #ff6b5e;
+  background: radial-gradient(circle at 35% 30%, rgba(46,18,16,.96), rgba(24,10,9,.96));
+  border-color: rgba(232,96,84,.85);
+  text-shadow: 0 0 6px rgba(255,107,94,.5);
+}
+
+/* 右侧 / 左侧的两个对手框（2v2） */
+.hero-card.side-right {
+  left: auto; right: 1.2vw;
+  top: 50%; transform: translateY(-50%);
+}
+.hero-card.side-left {
+  right: auto; left: 1.2vw;
+  top: 50%; transform: translateY(-50%);
+}
+/* 侧边框的信息浮层不外溢：右框向左展开、左框向右展开 */
+.hero-card.side-right .hero-info {
+  left: auto; right: 0; top: calc(100% + 8px);
+  transform: translateY(6px);
+}
+.hero-card.side-left .hero-info {
+  left: 0; right: auto; top: calc(100% + 8px);
+  transform: translateY(6px);
+}
+.hero-card.side-right:hover .hero-info,
+.hero-card.side-right.info-open .hero-info,
+.hero-card.side-left:hover .hero-info,
+.hero-card.side-left.info-open .hero-info {
+  transform: translateY(0);
+}
+/* 受击抖动：侧边框的基准位移是 translateY(-50%)，单独写一套 keyframes */
+.hero-card.side-right.hit { animation-name: hero-hit-side; }
+.hero-card.side-left.hit { animation-name: hero-hit-side; }
+@keyframes hero-hit-side {
+  0%, 100% { transform: translateY(-50%); }
+  15% { transform: translate(-9px, -50%) rotate(-1.5deg); }
+  45% { transform: translate(7px, -50%) rotate(1deg); }
+  75% { transform: translate(-4px, -50%); }
+}
+/* 多余的席位框（1v1 时的 p2 / p3）直接不显示 */
+.hero-card.hidden { display: none !important; }
+
+/* 选将界面：左上角返回主界面按钮（不创建对局） */
+.pick-back {
+  position: fixed;
+  left: clamp(10px, 2vw, 26px);
+  top: clamp(10px, 2vh, 22px);
+  z-index: 6;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: clamp(6px, 1vh, 9px) clamp(12px, 1.6vw, 18px);
+  font-family: inherit;
+  font-size: clamp(11px, 1.3vw, 14px);
+  letter-spacing: .1em;
+  color: #efe2c6;
+  background: linear-gradient(180deg, rgba(28,24,20,.86), rgba(14,12,10,.9));
+  border: 1px solid rgba(214,178,110,.55);
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,236,190,.14);
+  transition: transform .16s ease, border-color .16s ease, color .16s ease;
+}
+.pick-back:hover {
+  color: #ffeab8;
+  border-color: rgba(240,205,130,.9);
+  transform: translateY(-1px);
+}
+.pick-back:active { transform: translateY(0) scale(.98); }
+.pick-back-ico { font-size: 1.05em; line-height: 1; }
+
+/* ==========================================================
+   阵亡角色：整框灰化 + 「阵亡」印章
+   ----------------------------------------------------------
+   · 立绘 / 名字 / 体力 / 势力全部去色压暗，存活角色仍保持原色；
+   · 上方叠一层暗纱 + 红色「阵亡」，一眼可分（不挡点击，便于查看技能）。
+   ========================================================== */
+.hero-card.dead,
+.hero-card.dead-self { opacity: .9; }
+.hero-card.dead .hero-art,
+.hero-card.dead-self .hero-art {
+  filter: grayscale(1) brightness(.46) contrast(.92);
+}
+.hero-card.dead .hero-name,
+.hero-card.dead-self .hero-name,
+.hero-card.dead .hero-faction,
+.hero-card.dead-self .hero-faction,
+.hero-card.dead .hero-hp,
+.hero-card.dead-self .hero-hp,
+.hero-card.dead .hero-hand-count,
+.hero-card.dead-self .hero-hand-count,
+.hero-card.dead .hero-nick,
+.hero-card.dead-self .hero-nick {
+  filter: grayscale(1);
+  opacity: .68;
+}
+.hero-card.dead::after,
+.hero-card.dead-self::after {
+  content: "阵亡";
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-family: "SGSHanYiWeiBei", "STKaiti", "KaiTi", "PingFang SC", serif;
+  font-size: clamp(14px, 2.3vh, 22px);
+  font-weight: 700;
+  letter-spacing: .3em; text-indent: .3em;
+  color: rgba(255,116,102,.95);
+  background: rgba(6,5,4,.5);
+  border: 1px solid rgba(198,74,62,.42);
+  text-shadow: 0 2px 10px rgba(0,0,0,.9), 0 0 16px rgba(255,80,64,.35);
+  pointer-events: none;
+  z-index: 9;
+}
+/* 阵亡角色不再有「当前行动 / 可选中」的高亮 */
+.hero-card.dead.acting,
+.hero-card.dead-self.acting { animation: none; }
+.hero-card.dead.targetable,
+.hero-card.dead-self.targetable { animation: none; }
+
+/* ==========================================================
+   队友手牌查看（2v2 同阵营）
+   ----------------------------------------------------------
+   · 角色框左下角的手牌数变成可点交互（.clickable 给一点提示）；
+   · 点击后在屏幕中央弹出只读手牌面板，点击遮罩或【关闭】收起。
+   ========================================================== */
+.hero-card .hero-hand-count.clickable {
+  cursor: pointer;
+  pointer-events: auto;
+  border-bottom: 1px dashed rgba(240,205,130,.7);
+  padding-bottom: 1px;
+  transition: color .15s ease, text-shadow .15s ease;
+}
+.hero-card .hero-hand-count.clickable:hover {
+  color: #ffeab8;
+  text-shadow: 0 0 10px rgba(240,205,130,.85);
+}
+.team-hand-panel { z-index: 22; }
+.team-hand-panel .peek-actions {
+  flex: 0 0 auto;
+  display: flex; justify-content: center;
+  padding-top: 4px;
+}
+.team-hand-panel .peek-empty {
+  flex: 1 1 auto;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--muted);
+  font-size: clamp(11px, 1.8vh, 15px);
+  letter-spacing: .1em;
+}
+.team-hand-panel .peek-card { cursor: default; }
+.team-hand-panel .peek-card:hover {
+  transform: none; filter: none;
+}
+
+/* ==========================================================
+   2v2 组队房间
+   ----------------------------------------------------------
+   · 四个位置两两一组：左列队伍一（局内 1/4 号位）、
+     右列队伍二（局内 2/3 号位）；
+   · 头像：本地图片 96×96 压缩后自动保存；没有图片时用
+     昵称首字 + 稳定色相的 CSS 默认头像；
+   · 昵称在房间与局内角色框上方都会显示。
+   ========================================================== */
+/* ★ 房间背景：与战斗界面完全同一套底图与蒙版。
+   底图仍是 assets/backgrounds/background3.webp；.room-bg/.room-veil 的尺寸、
+   滤镜、渐变都与 .battle-bg / .battle-veil 对齐，视觉上就是同一屏战场。
+   图片探测失败时回退到与战斗界面同款的 CSS 青灰远景，不会露白底。 */
+.room-screen {
+  z-index: 24;
+  background: transparent;
+  overflow: hidden;
+}
+.room-bg-wrap {
+  position: absolute; inset: 0;
+  z-index: 0; overflow: hidden; pointer-events: none;
+}
+.room-bg {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: cover; object-position: center center;
+  filter: brightness(.84) saturate(.92);
+  display: none;
+}
+.room-bg-wrap.has-art .room-bg { display: block; }
+.room-bg-wrap:not(.has-art) {
+  background:
+    radial-gradient(ellipse 48% 38% at 50% 6%, rgba(120,152,190,.26), transparent 74%),
+    radial-gradient(ellipse 85% 44% at 50% 98%, rgba(70,102,120,.30), transparent 76%),
+    linear-gradient(180deg, #101d30 0%, #1a2c43 42%, #16263a 74%, #0b1522 100%);
+}
+.room-veil {
+  position: absolute; inset: 0;
+  z-index: 0; pointer-events: none;
+  background: none;
+}
+/* 与 #app.battle-art-on .battle-veil 同值：底图加载成功才加蒙版 */
+.room-bg-wrap.has-art + .room-veil {
+  background:
+    linear-gradient(180deg, rgba(8,12,16,.34) 0%, rgba(8,12,16,.08) 26%,
+                    rgba(8,12,16,.10) 70%, rgba(8,12,16,.38) 100%),
+    radial-gradient(ellipse 62% 58% at 50% 46%, transparent 52%, rgba(5,9,14,.26) 100%);
+}
+.room-panel { position: relative; z-index: 1; }
+.room-panel {
+  width: min(980px, 94vw);
+  max-height: 92vh;
+  overflow: auto;
+  display: flex; flex-direction: column; gap: clamp(8px, 1.6vh, 16px);
+  padding: clamp(12px, 2.4vh, 24px) clamp(14px, 2.6vw, 30px);
+  background: linear-gradient(180deg, rgba(20,16,12,.82), rgba(9,8,6,.88));
+  border: 1px solid rgba(217,178,106,.42);
+  border-radius: 12px;
+  box-shadow: 0 24px 60px rgba(0,0,0,.6);
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+}
+.room-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; flex-wrap: wrap;
+}
+.room-title {
+  font-family: "SGSHanYiWeiBei", "STKaiti", "KaiTi", "PingFang SC", serif;
+  font-size: clamp(16px, 2.6vh, 24px);
+  letter-spacing: .14em; color: #f0cf82;
+  text-shadow: 0 2px 8px #000;
+  display: flex; align-items: baseline; gap: 10px;
+}
+.room-role {
+  font-size: clamp(9px, 1.3vh, 12px); letter-spacing: .08em;
+  padding: 2px 8px; border-radius: 999px;
+  border: 1px solid rgba(217,178,106,.5);
+  color: #e8d3a6;
+}
+.room-code {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: clamp(14px, 2.2vh, 20px);
+  letter-spacing: .22em; color: #ffeab8;
+  text-shadow: 0 0 12px rgba(240,205,130,.45);
+}
+.room-head-btns { display: flex; gap: 8px; }
+
+.room-teams {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: clamp(8px, 1.6vw, 18px);
+  align-items: stretch;
+}
+.room-vs {
+  align-self: center;
+  font-family: "SGSHanYiWeiBei", serif;
+  font-size: clamp(14px, 2.4vh, 22px);
+  color: rgba(217,178,106,.65);
+  letter-spacing: .1em;
+}
+.room-team {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: clamp(8px, 1.4vh, 14px);
+  border-radius: 10px;
+  border: 1px solid rgba(217,178,106,.22);
+  background: linear-gradient(180deg, rgba(40,32,22,.42), rgba(16,13,10,.5));
+}
+.room-team.team-a { box-shadow: inset 0 0 0 1px rgba(70,208,122,.16); }
+.room-team.team-b { box-shadow: inset 0 0 0 1px rgba(255,107,94,.16); }
+.room-team-title {
+  font-size: clamp(11px, 1.5vh, 14px); letter-spacing: .14em;
+  color: #efe2c6;
+  display: flex; align-items: baseline; justify-content: space-between;
+}
+.room-team-title span { font-size: 78%; color: var(--muted); letter-spacing: .04em; }
+.room-slots { display: flex; flex-direction: column; gap: 8px; }
+.room-slot {
+  display: flex; align-items: center; gap: 10px;
+  padding: clamp(6px, 1vh, 10px);
+  border-radius: 8px;
+  border: 1px solid rgba(217,178,106,.24);
+  background: rgba(12,10,8,.55);
+}
+.room-slot.me { border-color: rgba(240,205,130,.75); box-shadow: 0 0 12px rgba(240,205,130,.18); }
+.room-slot.host { background: rgba(40,32,18,.6); }
+.room-slot.empty { opacity: .62; border-style: dashed; }
+.room-slot-info { min-width: 0; }
+.room-slot-nick {
+  font-size: clamp(12px, 1.7vh, 15px); color: #f4e9cf;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.room-slot-tag {
+  font-size: clamp(9px, 1.3vh, 11px); color: var(--muted); letter-spacing: .06em;
+}
+.room-avatar {
+  width: clamp(38px, 6vh, 56px); height: clamp(38px, 6vh, 56px);
+  flex: 0 0 auto; border-radius: 8px; overflow: hidden;
+  border: 1px solid rgba(217,178,106,.45);
+  background: #14100d;
+  display: flex; align-items: center; justify-content: center;
+}
+.room-avatar-img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.room-avatar.default {
+  background:
+    radial-gradient(circle at 32% 26%, rgba(255,255,255,.22), transparent 60%),
+    linear-gradient(160deg,
+      hsl(var(--av-h, 36) 58% 42%),
+      hsl(calc(var(--av-h, 36) + 26) 52% 22%));
+  font-family: "SGSHanYiWeiBei", "STKaiti", serif;
+  font-size: clamp(18px, 3vh, 26px);
+  color: #fff6e0; text-shadow: 0 2px 6px rgba(0,0,0,.7);
+}
+.room-avatar.placeholder {
+  color: rgba(217,178,106,.5); font-size: clamp(16px, 2.6vh, 22px);
+  background: rgba(0,0,0,.3);
+}
+.room-avatar.small { width: clamp(30px, 4.6vh, 42px); height: clamp(30px, 4.6vh, 42px); }
+
+.room-me {
+  display: flex; align-items: center; gap: clamp(10px, 1.8vw, 20px);
+  flex-wrap: wrap;
+  padding: clamp(8px, 1.4vh, 12px);
+  border-radius: 10px;
+  border: 1px solid rgba(217,178,106,.2);
+  background: rgba(10,8,6,.45);
+}
+.room-field { display: flex; align-items: center; gap: 8px; font-size: clamp(11px, 1.5vh, 13px); color: #e8d3a6; }
+.room-field input[type="text"], .room-field input:not([type]) {
+  width: clamp(110px, 16vw, 170px);
+  padding: 5px 8px; border-radius: 6px;
+  border: 1px solid rgba(217,178,106,.4);
+  background: rgba(0,0,0,.45); color: #f4e9cf;
+  font-family: inherit; font-size: inherit;
+}
+.room-field input[type="text"]:focus, .room-field input:not([type]):focus {
+  outline: none; border-color: rgba(240,205,130,.85);
+}
+.room-field-file input[type="file"] { color: #cfc2a8; font-size: 11px; max-width: 180px; }
+.room-toggle { display: flex; align-items: center; gap: 6px; font-size: clamp(11px, 1.5vh, 13px); color: #e8d3a6; }
+.room-toggle-tip { color: var(--muted); font-size: 88%; }
+.room-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  flex-wrap: wrap;
+}
+.room-status { font-size: clamp(11px, 1.5vh, 13px); color: #cbbfa6; letter-spacing: .04em; }
+.room-status.ok { color: #7fe0a2; }
+.room-status.err { color: #ff8c7f; }
+
+/* 换位置：空位可点、别人的位置可申请交换 */
+.room-slot { position: relative; transition: border-color .16s ease, transform .16s ease; }
+.room-slot.can-move { cursor: pointer; }
+.room-slot.can-move:hover {
+  border-color: rgba(240,205,130,.85);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(0,0,0,.45);
+}
+.room-slot.can-move::after {
+  content: "换到这里"; position: absolute; right: 8px; top: 50%;
+  transform: translateY(-50%);
+  font-size: clamp(9px, 1.25vh, 11px); color: rgba(240,205,130,.85);
+  letter-spacing: .08em;
+}
+.room-slot.ask-swap::after {
+  content: "申请交换"; position: absolute; right: 8px; top: 50%;
+  transform: translateY(-50%);
+  font-size: clamp(9px, 1.25vh, 11px); color: rgba(240,205,130,.85);
+  letter-spacing: .08em;
+}
+.room-tip {
+  font-size: clamp(10px, 1.35vh, 12px); color: var(--muted);
+  letter-spacing: .06em; text-align: center;
+}
+/* 交换位置申请条（房主与客机共用） */
+.room-ask {
+  position: absolute; left: 50%; bottom: clamp(12px, 3vh, 34px);
+  transform: translateX(-50%);
+  z-index: 3;
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(240,205,130,.6);
+  background: rgba(14,11,8,.94);
+  box-shadow: 0 12px 30px rgba(0,0,0,.6);
+  font-size: clamp(11px, 1.5vh, 13px); color: #f4e9cf;
+}
+.room-ask.hidden { display: none; }
+.room-ask-text { max-width: 60vw; }
+
+/* ---------------- 队伍选将（与局内 / 单机选将同一套视觉） ---------------- */
+/* ★ 不再用「暗色弹窗 + 棕色面板」那套老 UI：整层就是战斗界面同一张底图
+   （background3.webp，与房间 / 战场完全一致），上面直接排局内同款角色框。
+   图片加载失败时回退为与战斗界面相同的青灰远景，不会露白底。 */
+.team-pick {
+  z-index: 23;
+  background: #0e1826;
+  padding: 0;
+  display: block;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+.team-pick.overlay.hidden { display: none; }
+.team-pick-bg-wrap { position: fixed; inset: 0; overflow: hidden; z-index: 0; }
+.team-pick-bg {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: cover; object-position: center center;
+  filter: brightness(.8) saturate(.9);
+  display: none;
+}
+.team-pick-bg-wrap.has-art .team-pick-bg { display: block; }
+.team-pick-bg-wrap:not(.has-art) {
+  background:
+    radial-gradient(ellipse 48% 38% at 50% 8%, rgba(120,152,190,.30), transparent 74%),
+    radial-gradient(ellipse 85% 44% at 50% 98%, rgba(70,102,120,.34), transparent 76%),
+    linear-gradient(180deg, #101d30 0%, #1a2c43 42%, #16263a 74%, #0b1522 100%);
+}
+.team-pick-bg-wrap:not(.has-art)::before {
+  content: ""; position: absolute; left: -5%; right: -5%; bottom: 0; height: 50%;
+  background: linear-gradient(180deg, rgba(96,132,150,.30), rgba(10,20,32,.62));
+  clip-path: polygon(0 100%,0 58%,7% 44%,14% 62%,23% 30%,32% 66%,41% 44%,50% 70%,60% 34%,69% 62%,79% 42%,88% 66%,100% 48%,100% 100%);
+}
+.team-pick-veil {
+  position: fixed; inset: 0; pointer-events: none; z-index: 0;
+  /* 与房间 / 战斗界面同一套蒙版，另外给标题与角色框各压一层很轻的暗幕：
+     background3 是明亮风景，不压的话金色标题和小字会被天空吃掉。 */
+  background:
+    radial-gradient(ellipse 58% 26% at 50% 23%, rgba(4,8,14,.55) 0%,
+                    rgba(4,8,14,.20) 58%, transparent 82%),
+    linear-gradient(180deg, rgba(8,12,16,.20) 0%, rgba(8,12,16,.04) 24%,
+                    rgba(8,12,16,.04) 40%, rgba(8,12,16,.30) 58%,
+                    rgba(8,12,16,.30) 80%, rgba(8,12,16,.46) 100%),
+    radial-gradient(ellipse 62% 58% at 50% 46%, transparent 52%, rgba(5,9,14,.26) 100%);
+}
+.team-pick-panel {
+  position: relative; z-index: 1;
+  width: 100%;
+  min-height: 100%;
+  box-sizing: border-box;
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center;
+  gap: clamp(8px, 1.6vh, 16px);
+  padding: clamp(16px, 3.4vh, 36px) clamp(12px, 3vw, 36px) clamp(20px, 4vh, 44px);
+  background: transparent;
+  border: 0; border-radius: 0; box-shadow: none;
+  text-align: center;
+}
+.team-pick-title {
+  font-family: "SGSHanYiWeiBei", "STKaiti", "KaiTi", "PingFang SC", serif;
+  font-size: clamp(26px, 4.2vw, 50px);
+  font-weight: 800; letter-spacing: .12em; line-height: 1.15;
+  background: linear-gradient(180deg, #fff3cf 0%, #f0cf82 45%, #c2953d 100%);
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent; color: #f0cf82;
+  filter: drop-shadow(0 2px 8px rgba(0,0,0,.85)) drop-shadow(0 0 18px rgba(226,178,90,.3));
+}
+.team-pick-sub { font-size: clamp(10px, 1.4vw, 14px); color: rgba(226,232,240,.9);
+  letter-spacing: .1em;
+  /* background3 是明亮风景：给说明文字垫一层暗底，避免被天空吃掉 */
+  padding: 3px 14px;
+  border-radius: 999px;
+  background: rgba(6,10,16,.58);
+  border: 1px solid rgba(240,205,130,.16);
+  box-shadow: 0 2px 10px rgba(0,0,0,.35); }
+.team-pick-cards {
+  display: flex; justify-content: center; align-items: flex-start;
+  gap: clamp(10px, 1.8vw, 26px);
+  flex-wrap: wrap;
+  width: min(1120px, 96vw);
+  padding: 6px 0 2px;
+}
+/* 复用单机选将的 .pick-slot / .pick-hero / .pick-btn，尺寸与单机选将完全
+   一致（局内同款角色框），5 张卡在 1120px 内排得下、按钮完整可见。 */
+.team-pick-cards .pick-hero {
+  --hero-h: clamp(168px, 30vh, 232px);
+}
+.team-pick-cards .pick-slot { cursor: default; }
+/* ★ 队伍选将的卡片槽用独立类名 tp-hero-slot：.tp-slot 是目标牌区面板
+   早就占用的「空槽占位」样式（flex:1 1 0 / max-width:18% …），复用它会把
+   角色框挤成一条窄条，也是「老 UI 没删干净」的典型残留。 */
+.tp-hero-slot { position: relative; }
+.tp-hero-wrap { position: relative; }
+/* 已选 / 队友已选：框整体压暗 + 徽标，按钮同时置灰 */
+.tp-hero-slot.taken .pick-hero { filter: grayscale(1) brightness(.55); }
+.tp-hero-slot.mine .pick-hero {
+  border-color: rgba(70,208,122,.85);
+  box-shadow: 0 0 20px rgba(70,208,122,.35);
+}
+.tp-hero-slot.taken .pick-hero:hover, .tp-hero-slot.mine .pick-hero:hover {
+  transform: none; box-shadow: 0 0 20px rgba(70,208,122,.35);
+}
+.tp-badge {
+  position: absolute; left: 50%; top: 50%;
+  transform: translate(-50%, -50%) rotate(-8deg);
+  padding: 3px 10px; border-radius: 4px;
+  background: rgba(10,8,6,.82); color: #ffd9a0;
+  border: 1px solid rgba(240,205,130,.6);
+  font-size: clamp(10px, 1.4vh, 13px); letter-spacing: .1em;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.tp-hero-slot.mine .tp-badge { color: #8ef0b0; border-color: rgba(70,208,122,.75); }
+.tp-pick:disabled {
+  opacity: .55; cursor: default; color: #cbbfa6;
+  border-color: rgba(217,178,106,.3);
+}
+.tp-pick:disabled:hover { transform: none; box-shadow: none; background: linear-gradient(180deg, rgba(72,52,32,.6), rgba(28,26,32,.6)); }
+.tp-pick:disabled:hover em { transform: none; }
+.team-pick-foot { min-height: 1.4em; font-size: clamp(11px, 1.5vh, 13px); color: #cbbfa6; }
+.team-pick-tip {
+  margin: 0; font-size: clamp(9px, 1.15vw, 13px);
+  letter-spacing: .1em; color: rgba(240,207,130,.78);
+  text-shadow: 0 2px 8px rgba(0,0,0,.8);
+}
+
+/* 选将期间：战场上的四张角色框留空，画面只留战场底图。
+   ★ 必须限定在 #app 内：队伍选将面板（#team-pick）里的角色框也是
+     .hero-card，如果不加 #app，这条规则会把选将卡里的立绘 / 名字 / 势力 /
+     体力全部 visibility:hidden —— 表现就是「角色框全是黑的、没有立绘」。 */
+body.room-picking #app .hero-card .hero-art,
+body.room-picking #app .hero-card .hero-name,
+body.room-picking #app .hero-card .hero-hp,
+body.room-picking #app .hero-card .hero-faction,
+body.room-picking #app .hero-card .hero-nick,
+body.room-picking #app .hero-card .hero-q,
+body.room-picking #app .hero-card .hero-hand-count,
+body.room-picking #app .hero-card .hero-seat-in,
+body.room-picking #app .hero-card .hero-seat-out,
+body.room-picking #app .hero-card .hero-equips,
+body.room-picking #app .hero-card .hero-judge,
+body.room-picking #app .hero-card .hero-info,
+body.room-picking #app .hero-card .chain-mark { visibility: hidden; }
+body.room-picking #app .hero-card { box-shadow: 0 0 0 1px rgba(217,178,106,.18) inset; }
+
+@media (max-width: 720px) {
+  .room-teams { grid-template-columns: 1fr; }
+  .room-vs { display: none; }
+  .team-pick-cards .pick-hero { --hero-h: clamp(120px, 26vh, 168px); }
+}
+
+/* 联机面板：房间号行 + 模式说明 */
+.net-room-row { margin-bottom: 2px; }
+.net-room-tip {
+  font-size: 11px; color: var(--muted); letter-spacing: .04em;
+  align-self: center;
+}
+.net-row-tip {
+  font-size: 11px; color: var(--muted); letter-spacing: .04em;
+  align-self: center;
 }

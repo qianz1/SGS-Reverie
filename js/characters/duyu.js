@@ -38,7 +38,8 @@
    *   弃置（与贯石斧 / 寒冰剑共用 waitPick 的 allowEquip 多选区）。
    *   人类走统一选牌界面，AI 仍优先弃手牌（保住自己的装备）。
    */
-  async function chooseDiscards(game, player, n, hint) {
+  async function chooseDiscards(game, player, n, hint, opts) {
+    opts = opts || {};
     const hand = (player && player.hand) || [];
     const equips = (player && player.equips)
       ? ['weapon', 'armor', 'horsePlus', 'horseMinus']
@@ -53,7 +54,13 @@
         need: need, allowEquip: true, confirmLabel: '弃置', hint: hint
       });
     } else if (game.ai && typeof game.ai.pickDiscards === 'function') {
-      ids = game.ai.pickDiscards(player, need);
+      // ★【三陈】配合：杜预（或队友）还没觉醒【昭讨】时，AI 优先弃
+      //   「基本 / 锦囊 / 装备」各一张 —— 三张类型均不同才会触发
+      //   「摸一张 + 技能视为未发动」，帮助杜预更快累积觉醒次数。
+      ids = (opts.preferDistinct &&
+             typeof game.ai.pickDiscardsDistinct === 'function')
+        ? game.ai.pickDiscardsDistinct(player, need, pool)
+        : game.ai.pickDiscards(player, need);
     }
     if (!ids) ids = [];
     if (!Array.isArray(ids)) ids = [ids];
@@ -217,8 +224,14 @@
           await game.drawCards(target, 3);
           if (game.ui && typeof game.ui.render === 'function') game.ui.render(game);
 
+          // ★ 友方 AI 配合：杜预尚未觉醒【昭讨】时，目标是「自己 / 同阵营」
+          //   就让 AI 优先弃三张类型均不同的牌（凑出「三陈视为未发动」）。
+          const preferDistinct = !player.zhaotaoAwakened &&
+            !SGS.isDecider(target) &&
+            !!(game.isTeammate && game.isTeammate(player, target));
           const cards = await chooseDiscards(game, target, 3,
-            '【三陈】：请点选 3 张牌弃置（手牌或装备区的牌），然后确认。');
+            '【三陈】：请点选 3 张牌弃置（手牌或装备区的牌），然后确认。',
+            { preferDistinct: preferDistinct });
           if (cards.length) {
             await game.presentCards(cards, target, {
               dest: 'showcase', note: '三陈弃置',

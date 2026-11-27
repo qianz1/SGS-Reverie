@@ -126,6 +126,7 @@
   let bgm = null;
   let bgmStarted = false;
   let bgmPaused = false;
+  let bgmRetryFn = null;          // 自动播放被拦时的一次性手势补播
   const failed = new Set();       // 探测/播放失败过的 url，不再反复请求
   const dead = new Set();         // 本局已播过阵亡语音的角色，避免重复
   let lastSkill = null;           // { key, t } 短时去重
@@ -209,8 +210,39 @@
   }
 
   /**
-   * 启动战斗 BGM：必须在用户手势链路里调用（main.js 选将之后）。
-   * 幂等；已暂停过则恢复。文件缺失 / 自动播放被拒都静默。
+   * 自动播放被浏览器拦截时，挂一次性的「下一次点击补播」。
+   * 联机对局是在网络同步完成后才开局的，那一刻不一定处在用户手势链路里，
+   * 直接 play() 可能被策略拒绝；等玩家下一次点屏幕时再补播即可。
+   */
+  function armBgmRetry() {
+    if (bgmRetryFn) return;
+    if (typeof document === 'undefined' || !document.addEventListener) return;
+    bgmRetryFn = function () {
+      const fn = bgmRetryFn;
+      if (fn) {
+        try {
+          document.removeEventListener('pointerdown', fn, true);
+          document.removeEventListener('keydown', fn, true);
+        } catch (e) { /* 忽略 */ }
+      }
+      bgmRetryFn = null;
+      // 只补「本应播放、但被拦着」的情况；已暂停（结算）/ 文件坏掉都不重试
+      if (bgm && bgmStarted && !bgmPaused && bgm.paused &&
+          !failed.has(BGM_URL)) {
+        bgmStarted = false;
+        startBgm();
+      }
+    };
+    try {
+      document.addEventListener('pointerdown', bgmRetryFn, true);
+      document.addEventListener('keydown', bgmRetryFn, true);
+    } catch (e) { bgmRetryFn = null; }
+  }
+
+  /**
+   * 启动战斗 BGM：在「真正进入战斗」时调用（本地选将后 / 联机 begin·init）。
+   * 幂等；已暂停过则恢复。文件缺失 / 自动播放被拒都静默，
+   * 被拒时会在玩家下一次点击时自动补播。
    */
   function startBgm() {
     // 用户手势是一次新的机会：preload 阶段若因环境（无音频设备 / 解码器
@@ -227,6 +259,7 @@
     bgmStarted = true;
     calls.bgm.push(BGM_URL);
     play(bgm, BGM_URL);
+    armBgmRetry();
   }
 
   /** 结算画面出现时暂停 BGM（「再来一局」走 reload，会重新 startBgm） */
@@ -352,6 +385,13 @@
 
   /** 仅供自测：清空内部状态，重新开始一局 */
   function reset() {
+    if (bgmRetryFn && typeof document !== 'undefined' && document.removeEventListener) {
+      try {
+        document.removeEventListener('pointerdown', bgmRetryFn, true);
+        document.removeEventListener('keydown', bgmRetryFn, true);
+      } catch (e) { /* 忽略 */ }
+    }
+    bgmRetryFn = null;
     if (bgm) { try { bgm.pause(); } catch (e) {} }
     bgm = null;
     bgmStarted = false;

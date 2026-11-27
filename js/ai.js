@@ -38,6 +38,45 @@
       return card ? { card: card, conversion: conv } : null;
     }
 
+    /* ---------------- 2v2 阵营判断 ---------------- */
+
+    /** 两名角色是否同阵营（非组队模式恒 false；同一人视为同阵营） */
+    isTeammate(a, b) {
+      const g = this.game;
+      return !!(g && typeof g.isTeammate === 'function' && g.isTeammate(a, b));
+    }
+    isEnemy(a, b) { return !this.isTeammate(a, b); }
+    /** 同阵营的存活队友 */
+    alliesOf(player) {
+      const g = this.game;
+      if (!g || !g.teamMode || !g.players) return [];
+      return g.players.filter((p) => p && p !== player && !p.dead &&
+        !p.isDead() && this.isTeammate(player, p));
+    }
+    /** 敌方存活角色 */
+    enemiesOf(player) {
+      const g = this.game;
+      if (!g || !g.players) return [];
+      return g.players.filter((p) => p && p !== player && !p.dead &&
+        !p.isDead() && !this.isTeammate(player, p));
+    }
+
+    /**
+     * ★ 濒死求桃：只有队友才救（敌人不会浪费【桃】）。
+     *   返回实体【桃】；没有 / 不是队友 → null。
+     */
+    saveBrink(savior, dying) {
+      if (!savior || !dying || !this.game || !this.game.teamMode) return null;
+      if (dying.hp > 0 || dying.dead || dying === savior) return null;
+      if (!this.isTeammate(savior, dying)) return null;
+      const real = (savior.hand || []).find((c) => c && c.type === 'tao');
+      if (real) return real;
+      // ★ 转化的【桃】也是【桃】（【龙魂】♥ 当【桃】）：
+      //   没有真桃时用一张可转化的牌救队友，规则层按【桃】结算。
+      const conv = this.pickConverted(savior, 'brink', 'tao');
+      return conv ? conv.card : null;
+    }
+
     /** 出牌阶段 */
     async playPhase(player) {
       const g = this.game;
@@ -262,13 +301,67 @@
         taoyuan: 1, shunshou: 2, guohe: 3,
         juedou: 4, wanjian: 5, nanman: 6
       };
+      const team = !!(game && game.teamMode);
       const list = player.hand
         .filter((c) => SGS.Cards.isTrick(c.type))
         // 规则上桃园结义全场满血也能用；AI 只是「自己满血时不白白送回血」
         // 的决策（会连对手一起治），不影响 canUse() 的合法性判定。
-        .filter((c) => !(c.type === 'taoyuan' && player.hp >= player.maxHp))
+        // ★ 2v2：自己满血但队友受伤时仍可开（价值由 taoyuanWorthForTeam 判）。
+        .filter((c) => team || !(c.type === 'taoyuan' && player.hp >= player.maxHp))
+        // ★ 2v2：按阵营筛掉「会亏队友」的锦囊
+        .filter((c) => !team || this.trickWorthForTeam(game, player, c))
         .sort((a, b) => (priority[a.type] ?? 9) - (priority[b.type] ?? 9));
       return list.find((c) => SGS.Tricks.canUse(game, player, c).ok) || null;
+    }
+
+    /**
+     * ★ 2v2 锦囊价值判断：不伤害队友、不为难队友，只对敌人用。
+     *   · 单体伤害 / 拆牌类：至少有一名敌方合法目标才用（顺手 / 过河在
+     *     只剩队友可指时直接放弃，绝不拆自己人）；
+     *   · 群体伤害（万箭 / 南蛮）：队友会被打到且血少 / 无响应牌时不用；
+     *   · 桃园结义：己方缺的血多于敌方才用（否则等于替对手回血）。
+     */
+    trickWorthForTeam(game, player, card) {
+      const single = ['huogong', 'juedou', 'shunshou', 'guohe', 'jiedaosharen',
+        'lebusishu', 'bingliangcunduan'];
+      if (single.indexOf(card.type) >= 0) {
+        const targets = game.listTargets(player, card);
+        return targets.some((t) => this.isEnemy(player, t));
+      }
+      if (card.type === 'wanjian' || card.type === 'nanman') {
+        return this.aoeWorthForTeam(game, player, card);
+      }
+      if (card.type === 'taoyuan') return this.taoyuanWorthForTeam(game, player);
+      // 无中生有 / 五谷丰登 / 铁索连环 / 闪电：默认可用
+      return true;
+    }
+
+    /** 群体伤害是否划算：队友会被打且没有自保能力时放弃 */
+    aoeWorthForTeam(game, player, card) {
+      const reason = card.type === 'wanjian' ? '万箭齐发' : '南蛮入侵';
+      const need = card.type === 'wanjian' ? 'shan' : 'sha';
+      const mates = this.alliesOf(player)
+        .filter((m) => !(SGS.Equipment && SGS.Equipment.blocksAOE(m, reason)));
+      if (!mates.length) return true;
+      return mates.every((m) => {
+        if (m.hp <= 1) return false;                    // 队友会被打死 → 不用
+        const hand = m.hand || [];
+        return hand.some((c) => need === 'shan'
+          ? (typeof m.canUseAsShan === 'function' && m.canUseAsShan(c))
+          : (typeof m.canUseAsSha === 'function' && m.canUseAsSha(c)));
+      });
+    }
+
+    /** 桃园结义：己方缺失体力总和 > 敌方时才用 */
+    taoyuanWorthForTeam(game, player) {
+      let ally = 0, foe = 0;
+      (game.players || []).forEach((p) => {
+        if (!p || p.dead || p.isDead()) return;
+        const miss = Math.max(0, (p.maxHp || 0) - (p.hp || 0));
+        if (this.isTeammate(player, p)) ally += miss;
+        else foe += miss;
+      });
+      return ally > foe;
     }
 
     /** 选一张能当【杀】的牌：杀家族（普通杀 / 火杀 / 雷杀）优先，其次技能转化牌 */
@@ -288,7 +381,11 @@
      */
     shaTargets(game, player) {
       if (!game || typeof game.listTargets !== 'function') return [];
-      return game.listTargets(player, { type: 'sha' }, 'sha');
+      const all = game.listTargets(player, { type: 'sha' }, 'sha');
+      // ★ 2v2：只把敌人当作【杀】的合法目标 —— 打到队友等于自伤，
+      //   距离内没有敌人时宁可不出杀（宁缺毋滥）。
+      if (game.teamMode) return all.filter((t) => this.isEnemy(player, t));
+      return all;
     }
 
     /**
@@ -323,6 +420,13 @@
       return true;
     }
 
+    /** 这张锦囊对目标是否「有害」（用于 2v2 的无懈决策） */
+    harmfulTrick(card) {
+      const list = ['wanjian', 'nanman', 'juedou', 'huogong', 'chubuyi',
+        'shunshou', 'guohe', 'lebusishu', 'bingliangcunduan', 'jiedaosharen'];
+      return !!card && list.indexOf(card.type) >= 0;
+    }
+
     /**
      * 无懈响应：手里有【无懈可击】就使用（包括抵消别人的无懈）。
      * 「本轮不使用」只给玩家侧作为省时按钮，AI 不做整体放弃。
@@ -330,6 +434,19 @@
     askWuXie(player, opts) {
       // 不对自己使用的锦囊 / 自己刚打出的无懈使用无懈，避免白白送牌
       if (opts && opts.source === player) return null;
+      // ★ 2v2：只做「保护队友」或「破坏敌人收益」的无懈，不做反效果操作。
+      //   期望状态（negated）：
+      //     · 队友 / 自己 → 有害锦囊要被抵消，有益锦囊不要被抵消；
+      //     · 敌人        → 有害锦囊放行，有益锦囊要抵消。
+      //   当前状态已经等于期望时就不出无懈（包括「反无懈」的来回链）。
+      const g = this.game;
+      if (g && g.teamMode && opts && opts.card) {
+        const harmful = this.harmfulTrick(opts.card);
+        const target = opts.target || opts.user;
+        const mine = target ? this.isTeammate(player, target) : false;
+        const wantNegated = mine ? harmful : !harmful;
+        if (!!opts.negated === wantNegated) return null;
+      }
       const real = (player.hand || []).find((c) => c.type === 'wuxiekeji');
       if (real) return real;
       // ★【龙魂】♠ 当【无懈可击】：回传转化对象，由规则层统一校验花色
@@ -485,6 +602,35 @@
         return (rank[b.type] ?? 1) - (rank[a.type] ?? 1);
       });
       return scored.slice(0, n).map((c) => c.id);
+    }
+
+    /**
+     * ★【三陈】配合：优先弃置「基本 / 锦囊 / 装备」类型各不相同的牌。
+     * 类型均不同时【三陈】视为未发动、目标再摸一张，且杜预能更快累积
+     * 发动次数觉醒【昭讨】。每组内仍按 pickDiscards 的价值排序，
+     * 取最不值钱的那张（装备区的牌排在后面，尽量先弃手牌）。
+     * 类型凑不齐 n 种时退回普通弃牌。
+     */
+    pickDiscardsDistinct(player, n, pool) {
+      n = n || 3;
+      const hand = (player.hand || []).slice();
+      const src = (pool && pool.length) ? pool.slice() : hand.slice();
+      const ids = this.pickDiscards(player, hand.length) || [];
+      const ranked = ids
+        .map((id) => hand.find((c) => String(c.id) === String(id)))
+        .filter(Boolean);
+      src.forEach((c) => { if (c && ranked.indexOf(c) < 0) ranked.push(c); });
+      const seen = {};
+      const out = [];
+      for (const c of ranked) {
+        const kind = (c && c.category) || 'basic';
+        if (seen[kind]) continue;
+        seen[kind] = true;
+        out.push(c);
+        if (out.length >= n) break;
+      }
+      if (out.length < n) return this.pickDiscards(player, n);
+      return out.map((c) => c.id);
     }
 
     /**

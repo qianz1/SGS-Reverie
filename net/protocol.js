@@ -356,11 +356,18 @@
    * 牌堆顺序（deck.cards）、未亮出的判定牌一律不下发。
    */
   P.makeSnapshot = function (game, viewerSeat, extra) {
+    const viewer = (game.players || []).find((p) =>
+      String(p.seat) === String(viewerSeat));
     const players = (game.players || []).map((p) => ({
       seat: p.seat,
       charId: p.char && p.char.id,
       name: p.name,
+      nickname: p.nickname || '',
+      // ★ 2v2 阵营：客机靠它渲染「主 / 友 / 敌」身份字（不能靠 isHuman 猜）
+      team: p.team || null,
       hp: p.hp, maxHp: p.maxHp,
+      // ★ 真阵亡标记（hp<=0 只是濒死，不能用于灰化 / 跳过回合）
+      dead: !!p.dead,
       chained: !!p.chained,
       flipped: !!p.flipped,   // 武将牌背面朝上（翻面）：客机角色框同样盖牌背
       // 回合内状态：客机的按钮置灰 / 技能栏要靠这些字段
@@ -383,7 +390,9 @@
       //   回传的 id 必须能在权威端还原成同一张真牌；而客机拿到 id 也
       //   看不到牌面（牌背），所以不构成信息泄露。
       handIds: (p.hand || []).map((c) => c.id),
-      hand: String(p.seat) === String(viewerSeat)
+      // ★ 2v2 同阵营手牌互相可见（规则要求），其余情况只发自己的
+      hand: (String(p.seat) === String(viewerSeat) ||
+        (game.teamMode && viewer && p.team && p.team === viewer.team))
         ? (p.hand || []).map(plainCard) : []
     }));
     const wugu = game.ui && game.ui.wuguSession
@@ -396,6 +405,7 @@
     return {
       v: P.VERSION,
       t: 'snap',
+      teamMode: !!game.teamMode,
       viewerSeat: viewerSeat,
       players: players,
       deckRemaining: game.deck ? game.deck.remaining : 0,
@@ -443,9 +453,12 @@
                    skill: {}, displayName: d.name, introName: d.name };
       }
       p.name = d.name || p.char.name;
+      p.nickname = d.nickname || '';
+      p.team = d.team || null;
       p.isHuman = String(d.seat) === String(meSeat);   // UI 用它判断「你的回合」
       p.isRemote = !p.isHuman;
       p.maxHp = d.maxHp; p.hp = d.hp;
+      p.dead = !!d.dead;
       p.chained = !!d.chained;
       p.flipped = !!d.flipped;
       p.shaUsed = d.shaUsed || 0; p.jiuUsed = !!d.jiuUsed;
@@ -469,7 +482,11 @@
       p.delayed = (d.delayed || []).slice();
       p.hand = (d.hand || []).slice();
       // 对手手牌：牌背占位，但 id 是真的（供选牌回传还原，牌面仍不可见）
-      if (String(d.seat) !== String(meSeat)) {
+      const myTeam = (snap.players || []).find((x) =>
+        String(x.seat) === String(meSeat));
+      const teammate = !!(snap.teamMode && myTeam && d.team &&
+        d.team === myTeam.team);
+      if (String(d.seat) !== String(meSeat) && !teammate) {
         const ids = d.handIds || [];
         p.hand = new Array(d.handCount || 0).fill(null)
           .map((_, i) => ({ id: ids[i] != null ? ids[i] : ('__hidden_' + d.seat + '_' + i),
@@ -480,6 +497,7 @@
     });
 
     viewGame.players = list;
+    viewGame.teamMode = !!snap.teamMode;
     viewGame.human = list.find((p) => String(p.seat) === String(meSeat)) || list[0];
     viewGame.aiPlayer = list.find((p) => p !== viewGame.human) || list[1] || list[0];
     viewGame.deck = viewGame.deck || {};

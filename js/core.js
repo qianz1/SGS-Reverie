@@ -66,6 +66,9 @@
    */
   SGS.isDecider = function (player) {
     if (!player) return false;
+    // ★ 已阵亡的角色不再做任何决策（玩家侧转为观战）：即使后续有遗漏的
+    //   询问点，也不会挂起等待一个死人。
+    if (player.dead) return false;
     if (SGS.Options && SGS.Options.autoTakeover &&
         player.isHuman && !player.isRemote) return false;
     return !!(player.isHuman || player.isRemote);
@@ -124,7 +127,40 @@
         Array.from({ length: n }, (_, i) => i + 1), rng);
       list.forEach((p, i) => { p.seat = seats[i]; });
       return list.slice().sort((a, b) => a.seat - b.seat);
+    },
+    // ★ 2v2：四人局，1/4 号位同阵营、2/3 号位同阵营。
+    //   座次随机发 1..4（谁先手、谁坐 4 号位多摸一张都由它决定），
+    //   阵营永远跟着座位号走，所以「同一阵营」= 座位 1/4 或 2/3。
+    '2v2': function (list, rng) {
+      const n = list.length;
+      const seats = SGS.shuffleWith(
+        Array.from({ length: n }, (_, i) => i + 1), rng);
+      list.forEach((p, i) => { p.seat = seats[i]; });
+      return list.slice().sort((a, b) => a.seat - b.seat);
     }
+  };
+
+  /**
+   * ★ 2v2 阵营：1 / 4 号位为「甲」，2 / 3 号位为「乙」。
+   *   座位号是全局唯一的，所以联机时两端算出来的阵营一定一致，
+   *   不依赖「谁是房主 / 谁是玩家」这种视角信息。
+   */
+  SGS.teamOfSeat = function (seat) {
+    return (Number(seat) === 1 || Number(seat) === 4) ? 'A' : 'B';
+  };
+  /** 阵营名（日志 / 结算用） */
+  SGS.teamName = function (team) {
+    return team === 'A' ? '一四号位阵营' : '二三号位阵营';
+  };
+  /**
+   * ★ 身份字样：自己「主」、同阵营「友」、其它「敌」。
+   *   2v2 之外（1v1 / 自测）保持原来的「主 / 敌」，不引入新字样。
+   */
+  SGS.identityOf = function (viewer, player, teamMode) {
+    if (!player) return '';
+    if (player === viewer) return '主';
+    if (!teamMode || !viewer) return '敌';
+    return player.team && viewer.team && player.team === viewer.team ? '友' : '敌';
   };
 
   SGS.assignSeats = function (players, mode, rng) {

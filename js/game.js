@@ -40,6 +40,8 @@
       //   联机则由主机下发 remoteCharId，绝不本地随机覆盖。
       const others = Object.keys(chars).map((k) => chars[k])
         .filter((c) => c && c.id !== humanChar.id);
+      const teamMode = this.mode === '2v2';
+      this.teamMode = teamMode;
       let aiChar = (opts.remoteCharId && chars[opts.remoteCharId]) || null;
       if (!aiChar && this.mode === '1v1' && others.length) {
         const rng = typeof opts.rng === 'function' ? opts.rng : Math.random;
@@ -49,19 +51,61 @@
       }
       aiChar = aiChar || others[0] || chars.zhaoyun;
 
+      // ★★ 2v2 联机：房主已经排好「四个人 + 各自武将 + 固定座位」，
+      //   通过 opts.roster 直接建人，不再随机座次 / 随机武将：
+      //   roster = [{ charId, seat, isHuman, isRemote, nickname }, …]
+      //   这样房主与三台客机看到的座位、阵营、昵称完全一致。
+      if (Array.isArray(opts.roster) && opts.roster.length) {
+        this.players = opts.roster.map((r) => {
+          const c = chars[r.charId] || humanChar;
+          const p = new SGS.Player(c, !!r.isHuman);
+          p.seat = r.seat;
+          p.nickname = r.nickname || '';
+          p.isRemote = !p.isHuman && !!r.isRemote;
+          if (teamMode) p.team = SGS.teamOfSeat(p.seat);
+          return p;
+        }).sort((a, b) => a.seat - b.seat);
+        this.human = this.players.find((p) => p.isHuman) || this.players[0];
+        this.aiPlayer = this.players.find((p) => !p.isHuman) || this.players[1];
+      } else {
       this.human = new SGS.Player(humanChar, true);
-      this.aiPlayer = new SGS.Player(aiChar, false);
+      let roster;
+      if (teamMode) {
+        // ★ 2v2：一共四人。AI 从「玩家已选之外」的将池里随机取三个
+        //   互不相同的角色；联机时由主机按座位下发 aiCharIds（其余位置是
+        //   真人，仍然由主机统一决定武将，保证两端一致）。
+        const preset = Array.isArray(opts.remoteCharIds) ? opts.remoteCharIds : [];
+        const pool = SGS.shuffleWith(others.slice(),
+          typeof opts.rng === 'function' ? opts.rng : Math.random);
+        const picks = [];
+        for (let i = 0; i < 3; i++) {
+          const want = preset[i] && chars[preset[i]];
+          const c = want || pool.find((x) => picks.indexOf(x) < 0);
+          if (c) picks.push(c);
+        }
+        roster = [this.human].concat(picks.map((c) => new SGS.Player(c, false)));
+        this.aiPlayer = roster[1];
+      } else {
+        this.aiPlayer = new SGS.Player(aiChar, false);
+        roster = [this.human, this.aiPlayer];
+      }
       if (opts.remote) this.aiPlayer.isRemote = true;
       // players 数组即逆时针行动顺序，按座位号升序：一号位在下标 0。
       // ★ 座次由模式规则分派：1v1 把 1..N 序号随机分配给场上角色，
       //   所以先手可能是玩家也可能是 AI；human / aiPlayer 引用始终不变，
       //   UI 仍按下=玩家、上=AI 布局，只是两者的座位号会互换。
       //   未登记模式（含不传 opts 的自测入口）保持原顺序，结果完全确定。
-      this.players = [this.human, this.aiPlayer];
+      this.players = roster;
       if (typeof SGS.assignSeats === 'function') {
         this.players = SGS.assignSeats(this.players, this.mode, opts.rng);
       }
-      this.players.forEach((p, i) => { if (!p.seat) p.seat = i + 1; });
+      this.players.forEach((p, i) => {
+        if (!p.seat) p.seat = i + 1;
+        // ★ 2v2 阵营跟着座位号走（1/4 = A，2/3 = B）；其它模式不设置，
+        //   identityOf() 会退回「主 / 敌」。
+        if (teamMode) p.team = SGS.teamOfSeat(p.seat);
+      });
+      }
       // ★【伤逝】桥接：Player.removeCard() 移走手牌后回到这里复查
       //   「手牌数 < X」；同时保留失血时的复查（X 变大也会让条件成立）。
       //   ★ 这里只【排队】，不在当前同步栈里立刻摸牌 —— 见 queueHandBelowX。
@@ -95,6 +139,34 @@
       return player === this.human ? this.aiPlayer : this.human;
     }
 
+    /** 两名角色是否同阵营（2v2）；非组队模式恒为 false（自己除外） */
+    isTeammate(a, b) {
+      if (!a || !b) return false;
+      if (a === b) return true;
+      return !!(this.teamMode && a.team && b.team && a.team === b.team);
+    }
+
+    /** 同阵营的其它角色（2v2）；非组队模式返回空数组 */
+    teammatesOf(player, aliveOnly) {
+      if (!this.teamMode || !player || !player.team) return [];
+      return (this.players || []).filter((p) => p && p !== player &&
+        p.team === player.team && (!aliveOnly || !p.dead));
+    }
+    /** 该阵营是否还有存活角色 */
+    teamAlive(team) {
+      return (this.players || []).some((p) => p && p.team === team && !p.dead);
+    }
+    /**
+     * ★ 2v2 胜负：任一方的两名角色全部阵亡 → 另一方获胜。
+     *   返回获胜阵营（'A' / 'B'），还没有阵营全灭时返回 null。
+     */
+    wipedTeam() {
+      if (!this.teamMode) return null;
+      const teams = ['A', 'B'];
+      const alive = teams.filter((t) => this.teamAlive(t));
+      return alive.length === 1 ? alive[0] : (alive.length === 0 ? 'none' : null);
+    }
+
     /**
      * ★ 技能发动动画的统一入口。
      * 绝大多数技能由 ui.log() 从「XX 发动【技能】」日志兜底自动播横幅；
@@ -119,10 +191,22 @@
      */
     distance(from, to) {
       if (from === to) return 0;
-      const n = this.players.length;
-      const i = this.players.indexOf(from);
-      const j = this.players.indexOf(to);
-      let d = SGS.seatDistance(n, i, j);
+      // ★ 阵亡角色不再占用座位：距离只在「存活角色围成的圈」上计算，
+      //   因此阵亡者两侧的两人自动相邻（距离 1）。座位号本身不变 ——
+      //   回合顺序、身份显示仍按原座次。
+      const alive = (this.players || []).filter((p) => p && !p.dead);
+      let i = alive.indexOf(from);
+      let j = alive.indexOf(to);
+      let d;
+      if (i >= 0 && j >= 0) {
+        d = SGS.seatDistance(alive.length, i, j);
+      } else {
+        // 兜底（阵亡者自己参与的距离查询，理论上不会出现）：用原座圈
+        const n = this.players.length;
+        i = this.players.indexOf(from);
+        j = this.players.indexOf(to);
+        d = SGS.seatDistance(n, i, j);
+      }
       const bonus = (to.distanceBonus || 0) +
         (SGS.Equipment ? SGS.Equipment.distanceBonus(to) : 0);
       const reduce = (from.distanceReduce || 0) +
@@ -195,9 +279,18 @@
       if (SGS.isDecider(user)) {
         target = await this.ui.waitTarget(user, card, targets, this);
       } else {
-        // AI 对「可选自己也可选别人」的牌（火攻）优先打对手
-        const preferred = targets.find((p) => p !== user);
-        target = preferred || targets[0];
+        // AI 对「可选自己也可选别人」的牌（火攻）优先打对手；
+        // ★ 2v2：绝不指向队友 —— 先在非队友里挑，都不可选时才退回原列表；
+        //   同阵营优先打残血的那个（更像人）。
+        const others = targets.filter((p) => p !== user);
+        let pool = others.length ? others : targets;
+        if (this.teamMode) {
+          const foes = pool.filter((p) => !this.isTeammate(user, p));
+          if (foes.length) pool = foes;
+        }
+        pool = pool.slice().sort((a, b) =>
+          (a.hp || 0) - (b.hp || 0) || (b.maxHp || 0) - (a.maxHp || 0));
+        target = pool[0] || targets[0];
         await SGS.sleep(60);
       }
       if (!target) return null;
@@ -229,9 +322,21 @@
             picks = await this.ui.waitTargets(user, card, targets, this, 2);
           }
         } else if (targets.length) {
-          const first = targets[0];
+          // ★ 2v2：优先借敌人的刀；【杀】目标优先挑「被借刀者的队友」
+          //   （让他们内耗），其次任何不是自己的角色，最后才轮到自己。
+          let first = targets[0];
+          if (this.teamMode) {
+            const foe = targets.find((p) => !this.isTeammate(user, p));
+            if (foe) first = foe;
+          }
           const seconds = this.listTargets(first, { type: 'sha' }, 'sha');
-          const second = seconds.find((p) => p === user) || seconds[0];
+          let second;
+          if (this.teamMode) {
+            second = seconds.find((p) => p !== user && this.isTeammate(first, p)) ||
+              seconds.find((p) => p !== user) || seconds.find((p) => p === user);
+          } else {
+            second = seconds.find((p) => p === user) || seconds[0];
+          }
           if (second) picks = [first, second];
         }
         if (!picks || picks.length < 2) return [];
@@ -263,8 +368,14 @@
             picks = await this.ui.waitChainTargets(user, card, targets, this, min, max);
           }
         } else if (targets.length) {
-          const foe = targets.find((p) => p !== user);
-          picks = foe ? (targets.length > 1 ? [user, foe] : [foe]) : [user];
+          if (this.teamMode) {
+            // ★ 2v2：只连敌人，绝不自连 / 连队友（属性伤害会溅到自己人）
+            const foes = targets.filter((p) => !this.isTeammate(user, p));
+            picks = foes.slice(0, max);
+          } else {
+            const foe = targets.find((p) => p !== user);
+            picks = foe ? (targets.length > 1 ? [user, foe] : [foe]) : [user];
+          }
         }
         if (!picks || picks.length < min) return [];
         picks = picks.slice(0, max);
@@ -598,14 +709,16 @@
      */
 
     /**
-     * 双方各发 4 张起手牌。
+     * 开局发牌。
      * 开局发生在选将界面背后、且构造函数不能 await，因此这里直接发牌、不播动画；
      * 之后所有「摸牌」（摸牌阶段 / 无中生有）一律走 drawCards() 的动画流程。
+     * ★ 2v2：四号位起手 5 张（其余 4 张），用来弥补它是「最后行动」的劣势。
      */
     dealStartHands() {
       this.players.forEach((p) => {
-        p.draw(this.deck, 4);
-        if (SGS.log) SGS.log(p.name + ' 获得 4 张起手牌。', 'sys');
+        const n = (this.teamMode && p.seat === 4) ? 5 : 4;
+        p.draw(this.deck, n);
+        if (SGS.log) SGS.log(p.name + ' 获得 ' + n + ' 张起手牌。', 'sys');
       });
     }
 
@@ -623,10 +736,17 @@
           SGS.log('本局座次：' + seats + '；' + this.actor.name + ' 先手。', 'turn');
         }
         SGS.log(
-          '对局开始：【' + h.name + '·' + h.skill.name + '】 VS 【' +
-            a.name + '·' + a.skill.name + '】',
+          this.teamMode
+            ? '对局开始：' + this.players.map((p) =>
+                '【' + p.name + '·' + p.skill.name + '】').join(' VS ')
+            : '对局开始：【' + h.name + '·' + h.skill.name + '】 VS 【' +
+                a.name + '·' + a.skill.name + '】',
           'turn'
         );
+        if (this.teamMode) {
+          SGS.log('2v2 规则：一四号位同阵营、二三号位同阵营；一方两人全部阵亡即告负。' +
+            '一号位首回合少摸一张，四号位起手五张，队友阵亡时同阵营另一人摸一张。', 'sys');
+        }
         SGS.log('规则：每回合摸 2 张，杀限 1 次（咆哮除外），酒限 1 次，手牌上限 = 当前体力。', 'sys');
         SGS.log('锦囊：无中生有 / 过河拆桥 / 顺手牵羊 / 万箭齐发 / 南蛮入侵 / 桃园结义 / 决斗 / 火攻 / 借刀杀人 / 五谷丰登 / 铁索连环。', 'sys');
         SGS.log('延时锦囊：乐不思蜀（非红桃跳过出牌）/ 兵粮寸断（非梅花跳过摸牌）/ 闪电（黑桃2~9造成3点雷电伤害）。', 'sys');
@@ -646,6 +766,8 @@
     /** 单个回合：依次执行六个阶段 */
     async runTurn() {
       const p = this.actor;
+      // ★ 阵亡角色不再行动：直接轮到下一名存活角色（2v2 里队友继续打，死者观战）。
+      if (!p || p.dead) { await this.advanceTurn(); return; }
       p.resetTurn();
       // ★【矢北】「每回合第一次回血，此后每次失去体力」：每个回合开始时，
       //   所有角色的受伤计数都清零（不只行动方），对手回合里挨打也要计数。
@@ -671,6 +793,12 @@
         this.ui.render(this);
         await this.runPhase(ph.key, p);
         if (this.over) return;          // 有人在阶段中阵亡，立即结束
+        // ★ 2v2：行动方在本回合内阵亡（闪电 / 决斗反伤等），
+        //   后续阶段不再执行 —— 死人不能继续摸牌出牌。
+        if (p.dead) {
+          if (SGS.log) SGS.log(p.name + ' 已阵亡，本回合剩余阶段跳过。', 'sys');
+          break;
+        }
         await SGS.sleep(280);
       }
 
@@ -685,8 +813,15 @@
     /** 回合切换：按座次交给下一名角色；回到一号位即进入下一轮。 */
     advanceTurn() {
       // 1v1 下等价于原来的 1-current，写成取模是为了将来多人局也成立。
-      this.current = (this.current + 1) % this.players.length;
-      if (this.current === 0) this.round++;
+      // ★ 阵亡角色不再拥有回合：一直前进到下一名存活角色为止；
+      //   整圈都死光时（理论只在结算收尾瞬间出现）退回原下标，交给 over 收场。
+      const n = this.players.length;
+      let guard = 0;
+      do {
+        this.current = (this.current + 1) % n;
+        if (this.current === 0) this.round++;
+      } while (this.players[this.current] && this.players[this.current].dead &&
+               ++guard < n);
       this.ui.render(this);
       return SGS.sleep(400);
     }
@@ -857,8 +992,15 @@
         if (SGS.log) SGS.log(p.name + '【摸牌阶段】被【兵粮寸断】跳过，不摸牌。', 'warn');
         return [];
       }
-      const cards = await this.drawCards(p, 2);
-      if (SGS.log) SGS.log(p.name + '【摸牌阶段】摸了 ' + cards.length + ' 张牌。');
+      // ★ 2v2：一号位的首个回合少摸一张（先手补偿）。
+      //   只判「本轮 = 第 1 轮且座位 1」，之后的回合恢复正常的 2 张。
+      const firstSeatShort = this.teamMode && p.seat === 1 && this.round === 1;
+      const need = firstSeatShort ? 1 : 2;
+      const cards = await this.drawCards(p, need);
+      if (SGS.log) {
+        SGS.log(p.name + '【摸牌阶段】摸了 ' + cards.length + ' 张牌' +
+          (firstSeatShort ? '（一号位首回合少摸一张）' : '') + '。');
+      }
       this.ui.render(this);
       return cards;
     }
@@ -897,6 +1039,12 @@
           }
           const ok = await this.applyPlay(p, act);
           if (this.over) return;
+          // ★ 出牌途中阵亡（决斗反伤 / 火攻等）：立刻结束出牌阶段，
+          //   绝不能让死人的界面继续等待下一次操作。
+          if (p.dead) {
+            if (SGS.log) SGS.log(p.name + ' 已阵亡，出牌阶段结束。', 'sys');
+            return;
+          }
           if (!ok) continue; // 使用不合法，继续等待下一次操作
           this.ui.render(this);
         }
@@ -2645,35 +2793,66 @@
       }
       if (target.hp <= 0) await this.brink(target);
       if (target.hp <= 0 && !this.over) {
-        await this.onDeath(target);   // 1v1 的胜负结算放到死亡弃置之后
-        this.gameOver(source);
+        await this.onDeath(target);
+        if (this.teamMode) {
+          // ★ 2v2：只有「一个阵营全灭」才结束对局，个别角色阵亡继续打
+          if (this.wipedTeam()) this.gameOver(source);
+        } else {
+          this.gameOver(source);
+        }
       }
 
-      // ★【铁索连环】属性伤害传导：火 / 雷伤害命中连环状态角色后，
-      //   按逆时针顺序依次传给其他连环角色（同来源、同程度、同属性）。
-      //   首目标即使濒死 / 阵亡也照样传导；所有受伤害者随后重置武将牌。
+      // ★【铁索连环】属性伤害传导（2026-11 规则修正）：
+      //   ① 先把这个直接命中的目标「整套」结算完（伤害 → 濒死 → 阵亡 →
+      //      胜负），也就是本方法走到这里时首目标已经全部处理完毕；
+      //   ② 再从**当前回合角色**开始按逆时针挨个检测全场：
+      //      处于连环状态的角色依次吃同来源 / 同程度 / 同属性的传导伤害，
+      //      每个人都完整结算（含濒死 / 阵亡）之后才轮到下一个人；
+      //   ③ 传导伤害不再二次传导（noChain）。
       const elemental = !asLoss && (dmgType === 'fire' || dmgType === 'thunder');
       if (elemental && target.chained && !opts.noChain && this.players) {
-        const start = Math.max(0, this.players.indexOf(target));
-        const spread = [];
-        for (let k = 1; k < this.players.length; k++) {
-          const p = this.players[(start + k) % this.players.length];
-          if (p.chained && !p.isDead()) spread.push(p);
-        }
         target.chained = false;
-        spread.forEach((p) => { p.chained = false; });
+        const origin = (this.actor && this.actor.dead) ? target : (this.actor || target);
+        const order = this.turnOrderFrom(origin, true);
+        const spread = order.filter((p) => p && p !== target && p.chained && !p.dead);
         if (spread.length && SGS.log) {
           SGS.log('【铁索连环】' + target.name + ' 的' +
-            (dmgType === 'fire' ? '火焰' : '雷电') + '伤害传导给 ' +
+            (dmgType === 'fire' ? '火焰' : '雷电') + '伤害开始传导，自 ' +
+            origin.name + ' 起按逆时针依次传导给 ' +
             spread.map((p) => p.name).join('、') + '。', 'dmg');
         }
+        // ★ 传导伤害的来源：发起者若已经在首目标结算中阵亡，改为无来源伤害
+        const chainSource = (source && source.dead) ? null : source;
         for (const p of spread) {
-          await this.damage(p, source, total, dmgType, {
+          if (!p.chained || p.dead) continue;
+          p.chained = false;
+          if (SGS.log) {
+            SGS.log('【铁索连环】传导至 ' + p.name + '，' + p.name + ' 解除连环状态。', 'dmg');
+          }
+          this.ui.render(this);
+          await this.damage(p, chainSource, total, dmgType, {
             noChain: true, chainFixed: true,
             sound: opts.sound    // 火攻 / 闪电的固定音效随传导沿用
           });
+          if (this.over) return;
         }
       }
+    }
+
+    /**
+     * ★ 从某名角色开始、按逆时针（players 数组顺序）的座位序列。
+     *   includeSelf=false 时从「下家」开始（万箭齐发 / 南蛮入侵等由使用者
+     *   下家起的群体效果）；true 则包含本人（桃园结义 / 五谷丰登 / 铁索传导）。
+     */
+    turnOrderFrom(start, includeSelf) {
+      const n = (this.players || []).length;
+      if (!n) return [];
+      let i = (start && this.players.indexOf(start) >= 0)
+        ? this.players.indexOf(start) : 0;
+      if (!includeSelf) i = (i + 1) % n;
+      const out = [];
+      for (let k = 0; k < n; k++) out.push(this.players[(i + k) % n]);
+      return out;
     }
 
     /**
@@ -2791,8 +2970,111 @@
         await SGS.sleep(300);
       }
 
+      // ★ 自救失败 → 向其他角色求【桃】（顺序同桃园结义：当前回合角色起
+      //   逆时针）。2v2 里队友会救；1v1 只有一个对手，没有求桃的必要，
+      //   因此不做弹窗打扰（原本的自救流程完全不变）。
+      if (target.hp <= 0 && !this.over) await this.askOthersForTao(target);
+
       // 脱离濒死才摸第二张；没救回来（随后阵亡）只触发了「进入」那一次
       if (target.hp > 0 && passive) await passive(this, target, 'leave');
+    }
+
+    /**
+     * ★ 濒死「可当【桃】使用」的牌：真【桃】直接算；转化的牌必须同时满足
+     *   · canUseAsType(card, 'tao') 通过；
+     *   · 该技能的转化项明确声明了 brink 场景（如【龙魂】♥ 当【桃】），
+     *     避免把「只能在出牌阶段当桃」的技能误用到救援上。
+     * @returns {null|{card, asName, skillName}}
+     */
+    rescueTaoOf(player, card) {
+      if (!player || !card) return null;
+      if (card.type === 'tao') return { card: card, asName: null, skillName: null };
+      if (typeof player.canUseAsType !== 'function' ||
+          !player.canUseAsType(card, 'tao')) return null;
+      const convs = (player.skill && player.skill.conversions) || [];
+      const conv = convs.find((c) => c && c.to === 'tao' &&
+        (c.scenes || ['play']).indexOf('brink') >= 0 &&
+        (!SGS.Cards.matchesFrom || SGS.Cards.matchesFrom(card, c.from)));
+      if (!conv) return null;
+      return {
+        card: card,
+        asName: '桃',
+        skillName: conv.skill || (player.skill && player.skill.name) || '技能'
+      };
+    }
+
+    /**
+     * ★ 濒死求桃：濒死角色自救失败后，从当前回合角色起按逆时针依次询问
+     *   其他角色是否对其使用【桃】；每张回复 1 点，脱离濒死即停止。
+     *   · 只问同阵营角色（2v2 队友）与「愿意救」的一方 —— 敌人不会救，
+     *     1v1 也没有队友，因此单挑流程与以前完全一致（不弹无意义的窗）。
+     *   · 真人走 ui.waitPick（点一张【桃】→【使用桃】/【不救】），
+     *     AI 走 ai.saveBrink。
+     */
+    async askOthersForTao(target) {
+      if (!target || target.hp > 0 || this.over) return;
+      if (!this.players || this.players.length <= 2) return;
+      const order = this.turnOrderFrom(this.actor || target, true)
+        .filter((p) => p && p !== target && !p.dead && !p.isDead());
+      if (SGS.log) SGS.log('向其他角色求【桃】（自 ' +
+        ((this.actor && this.actor.name) || target.name) + ' 起逆时针）。', 'sys');
+      let guard = 0;
+      while (target.hp <= 0 && !this.over && guard++ < 3) {
+        let acted = false;
+        for (const p of order) {
+          if (target.hp > 0 || this.over) return;
+          if (!p || p.dead || p.isDead()) continue;
+          if (!this.isTeammate(p, target)) continue;      // 敌人不救
+          // ★ 候选 = 真【桃】+ 转化当【桃】的牌（【龙魂】♥ 当【桃】）。
+          //   「转化的桃就是桃」：救援时一律按【桃】结算，回 1 点体力。
+          const pool = this.conversionCardPool(p);
+          const usable = pool.some((c) => !!this.rescueTaoOf(p, c));
+          if (!usable) continue;
+
+          let card = null;
+          if (SGS.isDecider(p) && this.ui && typeof this.ui.waitPick === 'function') {
+            const id = await this.ui.waitPick(p, this, {
+              hint: '【濒死求桃】' + target.name + ' 濒死，可用【桃】或转化当【桃】的牌救他。',
+              confirmLabel: '使用桃', cancelLabel: '不救',
+              allowEquip: true,
+              filter: (c) => !!this.rescueTaoOf(p, c),
+              rejectHint: '只能用【桃】（或技能转化当【桃】的牌）救援。'
+            });
+            if (id) {
+              const entry = this.conversionCardEntry(p, id);
+              card = entry ? entry.card : null;
+            }
+          } else if (this.ai && typeof this.ai.saveBrink === 'function') {
+            card = this.ai.saveBrink(p, target);
+          }
+          const used = card ? this.rescueTaoOf(p, card) : null;
+          if (!used) continue;
+
+          this.playCardVoice(p, used.card, 'tao');
+          await this.presentCard(used.card, p, {
+            dest: 'showcase',
+            asName: used.asName,
+            note: used.asName ? null : '濒死求桃'
+          });
+          await this.discardConsumed(p, used.card);
+          this.healPlayer(target, 1);
+          if (SGS.log) {
+            const head = used.skillName
+              ? p.name + ' 发动【' + used.skillName + '】，将【' +
+                used.card.name + '】当【桃】对 ' + target.name + ' 使用'
+              : p.name + ' 对 ' + target.name + ' 使用【桃】';
+            SGS.log(head + '，' + target.name + ' 体力恢复至 ' +
+              Math.max(0, target.hp) + '/' + target.maxHp + '。', 'heal');
+          }
+          this.ui.render(this);
+          await SGS.sleep(320);
+          acted = true;
+        }
+        if (!acted) break;
+      }
+      if (target.hp > 0 && SGS.log) {
+        SGS.log(target.name + ' 脱离濒死状态。', 'heal');
+      }
     }
 
     /**
@@ -2901,6 +3183,16 @@
           cards.length + ' 张牌。', 'dmg');
       }
       this.ui.render(this);
+      // ★ 2v2：同阵营的队友阵亡 → 另一名同阵营角色摸一张牌（鼓励配合）
+      if (this.teamMode) {
+        const mate = this.teammatesOf(player, true)[0];
+        if (mate) {
+          if (SGS.log) {
+            SGS.log(player.name + ' 阵亡，同阵营的 ' + mate.name + ' 摸一张牌。', 'sys');
+          }
+          await this.drawCards(mate, 1);
+        }
+      }
       // 展示区入场动画约 350ms；播完后再等 1 秒才结算胜负
       await SGS.sleep(350);
       await SGS.sleep(1000);
@@ -2912,10 +3204,20 @@
       if (!winner || (typeof winner.isDead === 'function' && winner.isDead())) {
         winner = (this.players || []).find((p) => p && !p.isDead()) || winner;
       }
-      const win = !!(winner && winner.isHuman);
+      let win;
+      if (this.teamMode) {
+        // ★ 2v2：胜负看阵营 —— 自己所在阵营还有活人就算赢（此时对方已全灭）。
+        const myTeam = this.human && this.human.team;
+        win = !!myTeam && this.teamAlive(myTeam) && !this.teamAlive(myTeam === 'A' ? 'B' : 'A');
+      } else {
+        win = !!(winner && winner.isHuman);
+      }
       if (SGS.log) {
         // 同样只写角色名（联机两端共用一份记录）
-        SGS.log('🎉 对局结束：' + ((winner && winner.name) || '无人') + ' 获胜。', 'turn');
+        const winnerText = this.teamMode
+          ? (SGS.teamName(win ? this.human.team : (this.human.team === 'A' ? 'B' : 'A')))
+          : ((winner && winner.name) || '无人');
+        SGS.log('🎉 对局结束：' + winnerText + ' 获胜。', 'turn');
       }
       this.ui.showGameOver(win, this);
     }

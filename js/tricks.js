@@ -169,6 +169,18 @@
   }
 
   /**
+   * ★ 群体锦囊的结算顺序：统一按「逆时针（game.players 顺序）」重排，
+   *   万箭齐发 / 南蛮入侵从**使用者的下家**开始（使用者自己不参与），
+   *   桃园结义 / 五谷丰登从**使用者本人**开始。
+   *   逐个完整结算（响应 → 伤害 → 濒死 → 阵亡）后才轮到下一个人。
+   */
+  function orderAoeTargets(game, user, chosen, includeSelf) {
+    if (!game || typeof game.turnOrderFrom !== 'function') return chosen || [];
+    const order = game.turnOrderFrom(user, includeSelf);
+    return order.filter((p) => (chosen || []).indexOf(p) >= 0);
+  }
+
+  /**
    * 群体锦囊（万箭齐发 / 南蛮入侵）：逐个目标索要 need 类型的响应牌，
    * 打不出则各受 1 点伤害。响应牌同样从手牌区 / 角色框飞入展示区。
    * 龙胆等转化技能由 Game.askRespond() 按 need 自动处理；need='sha' 时
@@ -210,7 +222,11 @@
         await SGS.sleep(200);
       } else {
         log(t.name + ' 没有打出【' + needName + '】。', 'warn');
-        await game.damage(t, user, 1);
+        // ★ 发起者若在本次 AOE 结算途中阵亡，后续伤害改为无来源伤害，
+        //   群体锦囊不停，继续按座次结算剩下的人。
+        const src = (user && !user.dead) ? user : null;
+        if (!src) log('（发起者已阵亡，本次伤害无来源）', 'sys');
+        await game.damage(t, src, 1);
         if (game.over) return;
       }
     }
@@ -780,13 +796,17 @@
         }
 
       } else if (card.type === 'wanjian') {
-        await resolveAOE(game, user, chosen, 'shan', '万箭齐发', wxCtx);
+        // ★ 从使用者下家起逆时针
+        await resolveAOE(game, user,
+          orderAoeTargets(game, user, chosen, false), 'shan', '万箭齐发', wxCtx);
 
       } else if (card.type === 'nanman') {
-        await resolveAOE(game, user, chosen, 'sha', '南蛮入侵', wxCtx);
+        await resolveAOE(game, user,
+          orderAoeTargets(game, user, chosen, false), 'sha', '南蛮入侵', wxCtx);
 
       } else if (card.type === 'taoyuan') {
-        await resolveTaoyuan(game, chosen, user, wxCtx);
+        // ★ 从使用者本人起逆时针
+        await resolveTaoyuan(game, orderAoeTargets(game, user, chosen, true), user, wxCtx);
 
       } else if (card.type === 'juedou') {
         await resolveDuel(game, user, target, wxCtx);
@@ -801,7 +821,8 @@
         await resolveBorrow(game, user, target, chosen[1], card, wxCtx);
 
       } else if (card.type === 'wugufengdeng') {
-        await resolveWugu(game, user, chosen, card, wxCtx);
+        await resolveWugu(game, user,
+          orderAoeTargets(game, user, chosen, true), card, wxCtx);
 
       } else if (card.type === 'tiesuolianhuan') {
         await resolveTiesuo(game, user, chosen, card, wxCtx);

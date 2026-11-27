@@ -39,6 +39,8 @@
       this.username = opts.username || '';
       this.password = opts.password || '';
       this.hostPeerId = opts.hostPeerId || (this.role === 'host' ? this.peerId : '');
+      // ★ 2v2 房间：hello 里带上昵称 / 头像，房主据此渲染四个位置
+      this.helloExtra = opts.helloExtra || null;
 
       this.seq = 0;
       this._seen = {};          // from -> 最大已处理 seq / 集合
@@ -96,9 +98,10 @@
       }), { qos: 1, retain: true });
     }
 
-    /** 客机宣布加入：只发给房主的 inbox */
+    /** 客机宣布加入：只发给房主的 inbox（2v2 会带上昵称 / 头像） */
     hello(extra) {
-      this._send('hello', Object.assign({ role: this.role }, extra || {}));
+      this._send('hello', Object.assign({ role: this.role },
+        this.helloExtra || {}, extra || {}));
     }
 
     _envelope(type, data) {
@@ -106,15 +109,20 @@
       return {
         app: APP, v: VERSION, sid: this.sid,
         seq: this.seq, from: this.peerId,
+        // ★ 2v2 星形：一台客机会同时收到「其他客机的 hello」和「房主的帧」，
+        //   必须能从信封上分辨发送者角色，否则会把别的客机误认成房主。
+        role: this.role,
         to: this.role === 'host' ? this.hostPeerId : '',
         type: type, data: data || {}
       };
     }
 
-    _send(type, data) {
+    _send(type, data, to) {
       const msg = this._envelope(type, data);
-      // to 为空（客机→房主）时按角色补上
-      if (this.role === 'host') msg.to = this.hostPeerId === this.peerId
+      // ★ 2v2 星形：房主要同时对接 3 台客机，必须按 peerId 定向发送；
+      //   不传 to 时退回 1v1 的「唯一对端」规则。
+      if (to) msg.to = to;
+      else if (this.role === 'host') msg.to = this.hostPeerId === this.peerId
         ? (this.guestPeerId || '') : this.hostPeerId;
       else msg.to = this.hostPeerId || '';
       const topic = msg.to
@@ -132,7 +140,10 @@
      *   P2P（WebRTC）打洞失败时由 Session 调用，每次一发一条 inbox 消息，
      *   仍带 (from, seq) 去重，QoS1 重发不会让动作执行两次。
      */
-    sendRelay(frame) { return this._send('relay', frame || {}); }
+    sendRelay(frame, to) { return this._send('relay', frame || {}, to); }
+
+    /** ★ 2v2 房间控制帧（welcome / room / pool / start…），可定向到某台客机 */
+    sendTo(type, data, to) { return this._send(type, data, to); }
 
     _onMqtt(topic, payload) {
       let msg;
@@ -172,7 +183,11 @@
         this.guestPeerId = msg.from;
         this.hostPeerId = this.peerId;
       }
-      if (this.role === 'guest' && msg.from) this.hostPeerId = msg.from;
+      // ★ 只有「房主发来的帧」才能改写宿主 peerId；
+      //   2v2 里订阅同一 presence 的其它客机不能把我们带偏。
+      if (this.role === 'guest' && msg.from && msg.role === 'host') {
+        this.hostPeerId = msg.from;
+      }
 
       if (msg.type === 'hello') { this.remoteReady = true; this._flush(); }
       if (msg.type === 'offer' || msg.type === 'answer') this.remoteReady = true;
@@ -180,7 +195,17 @@
       // ★ 公网中继帧：与 PeerConnection 无关，不做 sid 过滤
       //   （ICE restart 会换 sid，但中继本来就绕过了它）。
       if (msg.type === 'relay') {
-        try { this.onRelay(msg.data || {}); } catch (e) {}
+        // ★ 2v2 房主要知道「这一帧是哪台客机发的」（act / pick），
+        //   所以把来源 peerId 一并透传；1v1 的调用方忽略第二个参数即可。
+        try { this.onRelay(msg.data || {}, msg.from); } catch (e) {}
+        return;
+      }
+
+      // ★ 2v2 房间控制帧（welcome / room / pool / start / pick / bye-room）：
+      //   与 PeerConnection 无关，不做 sid 过滤，直接交给上层。
+      if (msg.type === 'welcome' || msg.type === 'room' || msg.type === 'pool' ||
+          msg.type === 'start' || msg.type === 'pick' || msg.type === 'kick') {
+        try { this.onSignal(msg.type, msg.data || {}, msg.from); } catch (e) {}
         return;
       }
 
@@ -217,6 +242,64 @@
       this.mqtt.close();
     }
   }
+
+  /**
+   * ★ 中继地址规范化：玩家在输入框里可能写 http(s)://、只写域名端口、
+   *   或漏了 /mqtt 路径。统一成 ws(s)://host[:port]/mqtt，方便 frp 用户
+   *   直接粘「http://公网IP:端口」也能用。空串 / 非法 → 返回 ''。
+   */
+  Net.normalizeBrokerUrl = function (raw) {
+    let s = String(raw == null ? '' : raw).trim();
+    if (!s) return '';
+    if (/^wss?:\/\//i.test(s)) { /* 已是 ws 协议 */ }
+    else if (/^https?:\/\//i.test(s)) s = s.replace(/^http/i, 'ws');
+    else if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) return '';
+    else s = 'ws://' + s;
+    s = s.replace(/\/+$/, '');
+    const m = s.match(/^(wss?):\/\/([^/?#]+)(\/[^?#]*)?(\?.*)?$/i);
+    if (!m || !m[2]) return '';
+    const pathPart = m[3] || '';
+    const query = m[4] || '';
+    // EMQX 要求 /mqtt；自建 broker 任意路径都收，所以统一补上不冲突
+    if (!pathPart || pathPart === '/') return m[1] + '://' + m[2] + '/mqtt' + query;
+    return s;
+  };
+
+  /**
+   * ★ https 页面不能连 ws://：浏览器按「混合内容」直接拦掉，控制台只给一句
+   *   含糊的报错，玩家很容易误判成「frp 没通」。这里提前判定并给出可执行建议。
+   *   localhost / 127.0.0.1 例外（浏览器视其为可信来源）。
+   *   返回空串表示没问题，否则返回要展示给玩家的原因。
+   */
+  Net.brokerUrlProblem = function (url, pageProtocol) {
+    const u = String(url == null ? '' : url).trim();
+    if (!u) return '';
+    if (/^wss:\/\//i.test(u)) return '';
+    if (!/^ws:\/\//i.test(u)) {
+      return '中继地址格式不对，应形如 ws://1.2.3.4:6080/mqtt';
+    }
+    if (String(pageProtocol || '').toLowerCase() !== 'https:') return '';
+    const m = u.match(/^ws:\/\/([^/?#]+)/i);
+    const host = m ? m[1].replace(/:\d+$/, '').toLowerCase() : '';
+    if (host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1') {
+      return '';
+    }
+    return '当前页面是 https，浏览器会拦截 ws://（混合内容）：' +
+      '请改用 wss://（frp 的 HTTPS 隧道），或直接用 http 打开本页';
+  };
+
+  /**
+   * ★ 页面是 https 时，把 ws:// 升成 wss://（同一 host）。
+   *   反代 / frp 的 HTTPS 隧道不一定带 X-Forwarded-Proto，光靠服务端会猜错；
+   *   以「页面自己的协议」为准最稳。返回新地址，其它情况原样返回。
+   */
+  Net.brokerUrlForPage = function (url, pageProtocol) {
+    const u = String(url == null ? '' : url);
+    if (String(pageProtocol || '').toLowerCase() === 'https:' && /^ws:\/\//i.test(u)) {
+      return u.replace(/^ws:/i, 'wss:');
+    }
+    return u;
+  };
 
   Net.Signaling = Signaling;
   Net.SIGNAL_APP = APP;

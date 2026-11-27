@@ -49,13 +49,13 @@
         <span class="mode-tag">进入对局 <em>→</em></span>
       </button>
 
-      <button class="mode-item locked" data-mode="2v2" type="button">
+      <button class="mode-item open" data-mode="2v2" type="button">
         <span class="mode-no">02</span>
         <span class="mode-text">
           <span class="mode-name">组队</span>
-          <span class="mode-desc">双人配合 &nbsp;·&nbsp; 战术协作</span>
+          <span class="mode-desc">四人双阵营 &nbsp;·&nbsp; 一四号位 VS 二三号位</span>
         </span>
-        <span class="mode-tag">敬请期待</span>
+        <span class="mode-tag">进入对局 <em>→</em></span>
       </button>
 
       <button class="mode-item locked" data-mode="ddz" type="button">
@@ -77,7 +77,7 @@
       </button>
     </nav>
 
-    <p class="mode-foot">当前仅开放 01 单挑 &nbsp;·&nbsp; 其余模式敬请期待</p>
+    <p class="mode-foot">当前开放 01 单挑 / 02 组队 &nbsp;·&nbsp; 其余模式敬请期待</p>
   </div>
 
   <!-- 右下角署名：纯装饰，不承载交互；pointer-events:none 不挡任何点击 -->
@@ -128,7 +128,8 @@
     <!-- ★ 翻面：武将牌背面朝上时，在立绘之上叠一层半透明牌背 -->
     <img class="hero-art hero-flip hidden" id="ai-flip" src="assets/characters/back.webp" alt="">
     <div class="hero-faction" id="ai-faction"></div>
-    <div class="hero-q">敌</div>
+    <div class="hero-nick" id="ai-nick"></div>
+    <div class="hero-q" id="ai-q">敌</div>
     <div class="hero-name" id="ai-name"></div>
     <div class="hero-hp" id="ai-hp"></div>
     <div class="hero-hand-count" id="ai-count"></div>
@@ -172,7 +173,8 @@
     <!-- ★ 翻面：武将牌背面朝上时，在立绘之上叠一层半透明牌背 -->
     <img class="hero-art hero-flip hidden" id="me-flip" src="assets/characters/back.webp" alt="">
     <div class="hero-faction" id="me-faction"></div>
-    <div class="hero-q">主</div>
+    <div class="hero-nick" id="me-nick"></div>
+    <div class="hero-q" id="me-q">主</div>
     <div class="hero-name" id="me-name"></div>
     <div class="hero-hp" id="me-hp"></div>
     <!-- 铁索连环：处于连环状态时显示的横向锁链 -->
@@ -198,6 +200,9 @@
 
   <!-- 【火计·火攻】查看目标手牌面板：使用者点选一张让目标展示（正面，不用牌背） -->
   <div id="huogong-peek-panel" class="peek-panel hidden"></div>
+
+  <!-- 队友手牌面板：点击队友角色框左下角的手牌数弹出（只读，2v2 同阵营互看） -->
+  <div id="team-hand-panel" class="peek-panel team-hand-panel hidden"></div>
 
   <!-- 操作按钮区：手牌上方横排（由 ui.js 动态生成） -->
   <div id="actions" class="actions"></div>
@@ -234,6 +239,10 @@
     <img id="start-bg" class="start-bg" alt="">
   </div>
   <div class="start-veil"></div>
+  <!-- 单机选将：返回主界面（不创建对局） -->
+  <button id="btn-pick-back" class="pick-back" type="button">
+    <span class="pick-back-ico" aria-hidden="true">←</span> 返回主界面
+  </button>
   <div class="start-content">
     <div class="start-kicker"><i></i>CHARACTER SELECT &nbsp;/&nbsp; 选择武将<i></i></div>
     <h2 class="start-title">选择你的武将</h2>
@@ -262,6 +271,77 @@
 
     <div id="char-picker" class="char-picker"></div>
     <p class="start-tip">悬停或点击角色框查看技能 &nbsp;·&nbsp; 点「选择此将」开始对局</p>
+  </div>
+</div>
+
+<!-- ★ 2v2 组队房间：四个位置两两一组（左列队伍一 / 右列队伍二）
+     背景与战斗界面同一张底图（background3.webp，缺失时回退纯 CSS 远景）；
+     点击空位可直接换过去，点击别人的位置会发起「交换位置」申请。 -->
+<div id="room-screen" class="overlay room-screen hidden">
+  <div id="room-bg-wrap" class="room-bg-wrap">
+    <img id="room-bg" class="room-bg" alt="">
+  </div>
+  <div class="room-veil"></div>
+  <div class="room-panel">
+    <div class="room-head">
+      <div class="room-title">组队房间 <span id="room-role" class="room-role">房主</span>
+        <span id="room-code" class="room-code">------</span></div>
+      <div class="room-head-btns">
+        <button id="room-copy" class="btn tiny" type="button">复制房间码</button>
+        <button id="room-leave" class="btn tiny" type="button">退出房间</button>
+      </div>
+    </div>
+    <div class="room-teams">
+      <div class="room-team team-a">
+        <div class="room-team-title">队伍一 <span>局内 1 / 4 号位</span></div>
+        <div id="room-slots-a" class="room-slots"></div>
+      </div>
+      <div class="room-vs">VS</div>
+      <div class="room-team team-b">
+        <div class="room-team-title">队伍二 <span>局内 2 / 3 号位</span></div>
+        <div id="room-slots-b" class="room-slots"></div>
+      </div>
+    </div>
+    <div id="room-tip" class="room-tip">点空位可直接换过去 · 点别人会发出交换申请</div>
+    <div class="room-me">
+      <div id="room-me-avatar" class="room-me-avatar"></div>
+      <label class="room-field"><span>昵称</span>
+        <input id="room-nick" maxlength="8" spellcheck="false" placeholder="最多 8 个字">
+      </label>
+      <label class="room-field room-field-file"><span>头像</span>
+        <input id="room-avatar-file" type="file" accept="image/*">
+      </label>
+      <label class="room-toggle"><input id="room-random-team" type="checkbox">
+        随机阵营<span class="room-toggle-tip">（开启后不按房间位置分队）</span></label>
+    </div>
+    <div class="room-foot">
+      <div id="room-status" class="room-status">正在连接…</div>
+      <button id="room-start" class="btn primary hidden" type="button">开始游戏</button>
+    </div>
+  </div>
+  <!-- 交换位置申请条：房主 / 客机共用，同意才会真的换 -->
+  <div id="room-ask" class="room-ask hidden">
+    <span id="room-ask-text" class="room-ask-text"></span>
+    <button id="room-ask-yes" class="btn tiny primary" type="button">同意交换</button>
+    <button id="room-ask-no" class="btn tiny" type="button">拒绝</button>
+  </div>
+</div>
+
+<!-- ★ 2v2 队伍选将：同队共用 5 将池、队内不重复。
+     背景与房间 / 战斗界面同一张底图（background3.webp）；
+     角色框复用局内同款 .hero-card；框下方按钮确认，已选 / 队友已选打徽标。 -->
+<div id="team-pick" class="overlay team-pick hidden">
+  <div id="team-pick-bg-wrap" class="team-pick-bg-wrap">
+    <img id="team-pick-bg" class="team-pick-bg" alt="">
+  </div>
+  <div class="team-pick-veil"></div>
+  <div class="team-pick-panel">
+    <div class="start-kicker"><i></i>CHARACTER SELECT &nbsp;/&nbsp; 队伍选将<i></i></div>
+    <div class="team-pick-title">选择你的武将</div>
+    <div id="team-pick-sub" class="team-pick-sub">队伍将池 5 选 1 · 队内不可重复</div>
+    <div id="team-pick-cards" class="team-pick-cards"></div>
+    <div class="team-pick-foot"><span id="team-pick-status"></span></div>
+    <p class="team-pick-tip">悬停或长按角色框查看技能 · 点角色框下方按钮确认</p>
   </div>
 </div>
 
@@ -302,6 +382,7 @@
 <script src="net/transport.js"></script>
 <script src="net/signaling.js"></script>
 <script src="net/session.js"></script>
+<script src="net/room.js"></script>
 <script src="js/main.js"></script>
 </body>
 </html>
