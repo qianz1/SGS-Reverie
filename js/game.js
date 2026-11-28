@@ -2064,7 +2064,13 @@
               '【方天画戟】这是你最后一张手牌，此【杀】可指定 1~3 名目标。点选后按【确认】。');
           }
         } else {
-          picks = targets.slice(0, 3);   // AI 尽量连上所有目标
+          // ★【方天画戟】只是「能多打两个」，绝不能因为能多选就把队友连进去。
+          //   主目标仍按正常逻辑挑（2v2 里只会挑敌人），额外目标也只补敌人。
+          const main = await this.selectTarget(attacker, asCard, targets);
+          if (!main) return false;
+          const pool = targets.filter((p) => p !== main &&
+            !(this.teamMode && this.isTeammate(attacker, p)));
+          picks = [main].concat(pool.slice(0, 2));   // AI 尽量连上所有敌人
         }
         if (!picks || !picks.length) return false;
         target = picks[0];

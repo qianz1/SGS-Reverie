@@ -276,6 +276,33 @@
     return el && typeof el.closest === 'function' ? el.closest('.' + cls) : null;
   }
 
+  /**
+   * ★ waitX 方法 → 读秒播报需要的信息（与 Net.WAIT_INDEX 的「决策角色在第几个
+   *   实参」保持一致）。主机替远端玩家派发询问时，只有方法名 + 实参可用，
+   *   因此这张表让「本地读秒」和「远端读秒」共用同一套文案规则。
+   */
+  const ASK_NOTICE_CALLS = {
+    waitPlay: { mode: 'play', at: 0 },
+    waitRespond: {
+      mode: 'respond', at: 0,
+      info: (a) => ({ respondNeed: (a[2] || {}).need, respondReason: (a[2] || {}).reason })
+    },
+    waitBrink: { mode: 'brink', at: 0 },
+    waitWuXie: { mode: 'wuxie', at: 0 },
+    waitOptional: { mode: 'optional', at: 0, info: (a) => ({ optName: (a[2] || {}).name }) },
+    waitChoice: { mode: 'choice', at: 0, info: (a) => ({ name: (a[2] || {}).name }) },
+    waitDiscard: { mode: 'discard', at: 0 },
+    waitPick: { mode: 'pick', at: 0, info: (a) => ({ name: (a[2] || {}).name }) },
+    waitTarget: { mode: 'target', at: 0 },
+    waitTargets: { mode: 'targets', at: 0 },
+    waitChainTargets: { mode: 'chainTargets', at: 0 },
+    waitTrickCard: { mode: 'trick', at: 1 },
+    waitWugu: { mode: 'wugu', at: 1 },
+    waitReveal: { mode: 'reveal', at: 1, info: (a) => ({ title: (a[3] || {}).title }) },
+    waitPeekHand: { mode: 'peek', at: 0 }
+  };
+  SGS.ASK_NOTICE_CALLS = ASK_NOTICE_CALLS;
+
   class UI {
     constructor() {
       this.game = null;
@@ -296,6 +323,11 @@
       //   落地后按 id 去掉。没有这层，伤逝这类「在别人流程中间摸牌」就会在
       //   落点位置提前渲染出一张真牌（飞牌与真牌重影）。
       this._arriving = {};
+      // ★ 2v2 联机读秒：当前正在被询问（且不是回合角色）的人，用于红色描边
+      this._askOwner = null;
+      this._askTimer = null;
+      // ★ 其他角色框下方的倒计时胶囊（替代「N 号位」）
+      this._seatTimer = null;
     }
 
     init() {
@@ -1284,7 +1316,7 @@
     }
 
     /**
-     * ★ 重画顶部提示：读秒进行中时在文案后面追加一个「12s」徽标。
+     * ★ 重画顶部提示：读秒进行中时在文案后面追加一个「15s」徽标。
      *   用 textContent + 独立 span，避免把提示文案当 HTML 解析。
      */
     _paintHint() {
@@ -1318,9 +1350,178 @@
       return !!(this._netHost || this._netView);
     }
 
-    /** 各类交互的秒数：出牌阶段 12s（每用一张牌 / 一个技能都会重开一轮），其余 8s */
+    /** 各类交互的秒数：出牌阶段 15s（每用一张牌 / 一个技能都会重开一轮），其余 8s */
     askSecondsFor(mode) {
-      return mode === 'play' ? 12 : 8;
+      return mode === 'play' ? 15 : 8;
+    }
+
+    /**
+     * ★ 读秒胶囊的短标签（角色框下方那块）：只写「在做什么」，不带角色名
+     *   —— 挂在谁的角色框下面，谁就是本人。
+     *   技能类直接写技能名（称象 / 涅槃 / 三陈…）。
+     *   【无懈可击】统一写「询问无懈」：一张锦囊会依次问全场，逐个点名没意义。
+     */
+    askLabel(mode, player, info) {
+      const it = info || {};
+      switch (mode) {
+        case 'play': return '出牌';
+        case 'wuxie': return '询问无懈';
+        case 'brink': return '询问桃';
+        case 'respond': {
+          const need = it.respondNeed || it.need;
+          return '询问' + (need === 'sha' ? '杀'
+            : need === 'shan' ? '闪' : (it.respondReason || '响应'));
+        }
+        case 'optional': return it.optName || '技能';
+        case 'choice': return it.name || '选择';
+        case 'discard': return '弃牌';
+        case 'target':
+        case 'targets':
+        case 'chainTargets': return '选目标';
+        case 'pick':
+        case 'trick':
+        case 'wugu': return '选牌';
+        case 'peek': return '查看手牌';
+        case 'reveal': return it.title || '亮牌';
+        default: return '';
+      }
+    }
+
+    /**
+     * ★ 2v2 联机：把「现在谁在读秒、读的是什么」标到那个人身上。
+     *   由主机在派发询问时调用一次（本地问、远端问都要过这里）：
+     *   红色描边 + 角色框下方的倒计时胶囊，另发一条极小的座位帧给客机。
+     *   客机不调用本方法 —— 它们只重放表现，不跑规则。
+     *   ★ 日志不参与：牌局记录保持原样（这里不写 log）。
+     */
+    noticeAsk(method, args, decider) {
+      if (!this.askTimerOn(this.game)) return false;
+      const t = ASK_NOTICE_CALLS[method];
+      if (!t) return false;
+      const list = args || [];
+      const player = decider || list[t.at];
+      const label = this.askLabel(t.mode, player, t.info ? t.info(list) : null);
+      if (!label) return false;
+      this.paintAskOwner(player, true, {
+        label: label, secs: this.askSecondsFor(t.mode)
+      });
+      return true;
+    }
+
+    /**
+     * ★「正在读秒」标记：读条者**不是**当前回合角色时点红框（与绿色 .acting
+     *   相对，柔和红），并在其角色框下方显示「出牌·7s」这类倒计时胶囊
+     *   （顶掉原来的「N 号位」）。传 null 全部清除。
+     *   onAskOwner 是联机钩子：主机把它转成一条座位帧发给所有客机。
+     */
+    paintAskOwner(player, force, meta) {
+      const who = player || null;
+      const changed = (this._askOwner || null) !== who;
+      this._askOwner = who;
+      this.syncAskOwnerClass();
+      const m = meta || null;
+      if (who && m && m.label) {
+        // ★ 自己的读秒已经在引导文字后面的徽标里，角色框下方不再重复一遍
+        const local = this.game && this.game.human;
+        if (who !== local) this.showSeatTimer(who, m.label, m.secs);
+        else this.clearSeatTimer();
+      } else if (!who) {
+        this.clearSeatTimer();
+      }
+      // force：同一名玩家连着被问两件事时，客机可能已经自己收过红框 / 胶囊，
+      // 这里再发一次座位帧把它点回来（每问只发一条，不是每秒）。
+      if ((changed || force) && typeof this.onAskOwner === 'function') {
+        try {
+          this.onAskOwner(who
+            ? { seat: who.seat, label: m && m.label, secs: m && m.secs } : null);
+        } catch (e) {}
+      }
+    }
+
+    /** 把 .answering（红框）对齐到 _askOwner；每个角色的 .acting 仍归 render 管 */
+    syncAskOwnerClass() {
+      if (typeof document === 'undefined' ||
+          typeof document.getElementById !== 'function') return;
+      const g = this.game;
+      const who = this._askOwner;
+      ((g && g.players) || []).forEach((p) => {
+        const el = this.heroEl(p);
+        if (el && el.classList) {
+          el.classList.toggle('answering', !!who && p === who && g.actor !== p);
+        }
+      });
+      // ★ 胶囊还在走时，保证它那格号位仍是隐藏的（角色框万一被重建也兜住）
+      const st = this._seatTimer;
+      if (st) {
+        const h = this.heroEl(st.player);
+        if (h && h.classList) h.classList.add('timing');
+      }
+    }
+
+    /* ---------- 角色框下方的读秒胶囊（替代「N 号位」） ---------- */
+
+    /** 取（必要时创建）该角色框下方的读秒元素 */
+    heroTimerEl(player) {
+      const hero = this.heroEl(player);
+      if (!hero) return null;
+      if (typeof document === 'undefined' ||
+          typeof document.createElement !== 'function') return null;
+      let el = (typeof hero.querySelector === 'function')
+        ? hero.querySelector('.hero-timer') : null;
+      if (!el) {
+        el = document.createElement('div');
+        el.className = 'hero-timer';
+        if (typeof hero.appendChild === 'function') hero.appendChild(el);
+      }
+      return el;
+    }
+
+    /**
+     * ★ 其他角色框下方的读秒：倒计时胶囊替换「N 号位」。
+     *   秒数以本客户端的本地时钟走（与读条者同起同止，误差只在一个网络往返内）。
+     */
+    showSeatTimer(player, label, seconds) {
+      if (!player || !label) { this.clearSeatTimer(player); return; }
+      const secs = Math.max(1, Math.round(Number(seconds) || 8));
+      this.clearSeatTimer();
+      const hero = this.heroEl(player);
+      if (hero && hero.classList) hero.classList.add('timing');
+      const t = { player: player, label: String(label), left: secs, total: secs, timer: null };
+      this._seatTimer = t;
+      this.paintSeatTimer();
+      t.timer = setInterval(() => {
+        if (this._seatTimer !== t) return;
+        t.left -= 1;
+        if (t.left <= 0) { this.clearSeatTimer(); return; }
+        this.paintSeatTimer();
+      }, 1000);
+    }
+
+    paintSeatTimer() {
+      const t = this._seatTimer;
+      if (!t) return;
+      const el = this.heroTimerEl(t.player);
+      if (!el) return;
+      el.textContent = t.label + '·' + t.left + 's';
+      if (el.classList) el.classList.toggle('urgent', t.left <= 3);
+    }
+
+    clearSeatTimer(player) {
+      const t = this._seatTimer;
+      const who = player || (t && t.player) || null;
+      if (t && t.timer) clearInterval(t.timer);
+      if (this._seatTimer === t) this._seatTimer = null;
+      if (!who) return;
+      const hero = this.heroEl(who);
+      if (hero && hero.classList) hero.classList.remove('timing');
+      if (typeof document === 'undefined' ||
+          typeof document.getElementById !== 'function') return;
+      const el = (hero && typeof hero.querySelector === 'function')
+        ? hero.querySelector('.hero-timer') : null;
+      if (el) {
+        el.textContent = '';
+        if (el.classList) el.classList.remove('urgent');
+      }
     }
 
     /**
@@ -2076,8 +2277,14 @@
         node.dataset.player = key;
         if (node.classList) {
           ['acting', 'targetable', 'target-picked', 'info-open',
-           'has-art', 'has-equips', 'hit', 'side-left', 'side-right']
+           'has-art', 'has-equips', 'hit', 'side-left', 'side-right',
+           // ★ 读秒胶囊是每局临时挂的，模板克隆时不要带过去
+           'answering', 'timing']
             .forEach((c) => node.classList.remove(c));
+        }
+        if (typeof node.querySelectorAll === 'function') {
+          Array.prototype.forEach.call(node.querySelectorAll('.hero-timer'),
+            (el) => { if (el.parentNode) el.parentNode.removeChild(el); });
         }
         if (typeof node.querySelectorAll === 'function') {
           Array.prototype.forEach.call(node.querySelectorAll('[id]'), (el) => {
@@ -2615,6 +2822,8 @@
         const el = this.heroEl(p);
         if (el && el.classList) el.classList.toggle('acting', game.actor === p);
       });
+      // ★ 读秒红框：render 会重刷 .acting，这里把 .answering 一并刷回去
+      this.syncAskOwnerClass();
       // ★ 队友手牌面板：开着的时候跟着手牌变化刷新（手牌没变就不重绘 DOM）
       if (this._teamHandOpen) this.renderTeamHandPanel();
 
@@ -4422,6 +4631,10 @@
       const pd = this.pending;
       if (!pd) return false;
       this.pending = null;
+      // ★ 读秒红框跟着这一问一起收掉（主机放弃 / 重传耗尽时不能留个亮着的红框）
+      if (this._askOwner && pd.player && this._askOwner === pd.player) {
+        this.paintAskOwner(null);
+      }
       this.setHint('');
       if (typeof this.clearTargetPickMarks === 'function') this.clearTargetPickMarks();
       if (pd.mode === 'trick') this.closeTargetPanel();
@@ -4442,6 +4655,10 @@
       const pd = this.pending;
       if (!pd) return;
       this.pending = null;
+      // ★ 读秒红框：这一问已经作答 / 超时，收掉（只清自己标的那个人）
+      if (this._askOwner && pd.player && this._askOwner === pd.player) {
+        this.paintAskOwner(null);
+      }
       this.setHint('');
       // 清理目标选择高亮 / 已选标记 / 目标牌区面板，避免状态残留
       this.clearTargetPickMarks();
@@ -5528,6 +5745,9 @@
               all = all.filter((e) => e.zone === 'equip' &&
                 (e.zoneKey === 'horsePlus' || e.zoneKey === 'horseMinus'));
             }
+            // ★【顺手牵羊】+【张春华】/【沮授】：对面装备区有【诸葛连弩】就先牵它
+            //   （连弩对这两个角色是质变，也顺手拆掉对手的多刀）。
+            all = this.preferTrickEntries(all, user, cur.trickCard);
             if (!all.length) { this.closeTargetPanel(); this.finish(multi ? [] : null); return; }
             const pool = all.slice();
             const picks = [];
@@ -5546,6 +5766,21 @@
           });
         }
       });
+    }
+
+    /**
+     * ★ 目标牌区选牌的偏好（AI / 自动演示用）：
+     *   【顺手牵羊】+【张春华】/【沮授】：能把【诸葛连弩】牵走就先牵它
+     *   （连弩对这两个角色是质变，也顺手拆掉对手的多刀）。
+     *   其它情况原样返回 —— 收窄候选池，后面的随机选牌逻辑不变。
+     */
+    preferTrickEntries(list, user, trickCard) {
+      const all = list || [];
+      if (!trickCard || trickCard.type !== 'shunshou') return all;
+      if (!(SGS.Equipment && SGS.Equipment.wantsCrossbow &&
+            SGS.Equipment.wantsCrossbow(user))) return all;
+      const cross = all.filter((e) => e.card && e.card.type === 'zhugeliannu');
+      return cross.length ? cross : all;
     }
 
     /**

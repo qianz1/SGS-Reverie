@@ -536,7 +536,12 @@
           const seat = decider && decider.seat;
           const ui = (decider && decider.isRemote && this.remoteBySeat[seat])
             ? this.remoteBySeat[seat] : localUI;
-          return ui[name].apply(ui, arguments);
+          const ret = ui[name].apply(ui, arguments);
+          // ★ 2v2 联机读秒：房主替所有人播报「现在在问谁」
+          //   （日志经 onLog 同步，红色描边走一条极小的座位帧）。
+          //   放在派发之后：远端 ask 已先推快照，座位帧跟着新 current 走。
+          try { localUI.noticeAsk(name, arguments, decider); } catch (e) {}
+          return ret;
         };
       });
     }
@@ -1052,6 +1057,13 @@
       try { if (SGS.Audio && SGS.Audio.startBgm) SGS.Audio.startBgm(); } catch (e) {}
       ui.onRender = () => this.pushSnapshot();
       ui.onLog = (m, c) => this.send({ t: 'log', m: m, c: c });
+      // ★ 2v2 读秒：座位号 + 短标签 + 总秒数，客机据此点亮红框、走倒计时胶囊
+      ui.onAskOwner = (info) => this.send({
+        t: 'askOwner',
+        seat: info ? info.seat : null,
+        label: info ? info.label : '',
+        secs: info ? info.secs : 0
+      });
       RoomUI.closePick();
       this.sendInit();
       this.pushSnapshot(true);
@@ -1143,6 +1155,7 @@
       if (this.ui) {
         this.ui.onRender = null;
         this.ui.onLog = null;
+        this.ui.onAskOwner = null;
         this.ui._netHost = false;
       }
       RoomUI.closeAll();

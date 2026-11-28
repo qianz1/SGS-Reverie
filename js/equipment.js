@@ -268,6 +268,18 @@
     return weaponFlag(player, 'guding');
   }
 
+  /**
+   * ★ 这个人是不是「靠多刀吃饭」的角色：手里有【诸葛连弩】就值得换装。
+   *   张春华（伤逝补牌）与沮授（渐营摸牌）都能攒出一手【杀】，
+   *   连弩对他们是质变，别的武器再多一点也不换。
+   *   只认这两名角色，别的 AI 仍按「只填空槽」的老规则，不乱顶装备。
+   */
+  const CROSSBOW_SEEKERS = { zhangchunhua: true, jushou: true };
+  function wantsCrossbow(player) {
+    const id = player && player.char && player.char.id;
+    return !!(id && CROSSBOW_SEEKERS[id]);
+  }
+
   /** 装备区里的坐骑牌（+1 马 / -1 马），供【麒麟弓】筛选 */
   function horsesOf(player) {
     return ['horsePlus', 'horseMinus']
@@ -320,6 +332,7 @@
     hasCixiong: hasCixiong,
     hasGuanshi: hasGuanshi,
     hasFangtian: hasFangtian,
+    wantsCrossbow: wantsCrossbow,
     hasQinglong: hasQinglong,
     hasGudingdao: hasGudingdao,
     horsesOf: horsesOf,

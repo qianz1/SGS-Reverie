@@ -110,12 +110,10 @@
 
       // 2) 装备：四件都是锁定技，装上立即生效；优先填还没有装备的空槽
       //    （诸葛连弩能解除杀次数限制，所以要在出杀之前挂上）。
+      //    ★ 张春华 / 沮授：手里有【诸葛连弩】时优先换装（连弩对他们是质变）。
       guard = 0;
       while (guard++ < 6) {
-        const card = player.hand.find((c) =>
-          SGS.Cards.isEquip(c.type) &&
-          !(player.equips && player.equips[SGS.Equipment.slotOf(c.type)])
-        );
+        const card = this.pickEquipCard(player);
         if (!card) break;
         await g.useEquip(player, card);
         await SGS.sleep(280);
@@ -406,6 +404,27 @@
       const score = (c) => (SGS.Cards.isSha(c.type) ? 0 : 1);
       list.sort((a, b) => score(a) - score(b));
       return list[0] || null;
+    }
+
+    /**
+     * 本回合该装哪张装备（返回牌，或 null 表示不装了）。
+     *   默认口径：只填空槽 —— 装上就是收益，不折腾已经挂着的装备。
+     *   ★ 例外：【张春华】【沮授】靠【诸葛连弩】把攒下的【杀】连出去，
+     *     手里有连弩就直接顶掉当前武器（已经挂着连弩时不重复装）。
+     */
+    pickEquipCard(player) {
+      if (!player || !player.hand) return null;
+      const equips = player.equips || {};
+      const own = player.hand.filter((c) => SGS.Cards.isEquip(c.type));
+      if (!own.length) return null;
+      const cross = own.find((c) => c.type === 'zhugeliannu');
+      const equipped = equips.weapon;
+      if (cross && SGS.Equipment && SGS.Equipment.wantsCrossbow &&
+          SGS.Equipment.wantsCrossbow(player) &&
+          !(equipped && equipped.type === 'zhugeliannu')) {
+        return cross;
+      }
+      return own.find((c) => !equips[SGS.Equipment.slotOf(c.type)]) || null;
     }
 
     /**

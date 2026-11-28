@@ -223,7 +223,13 @@
         self[name] = function () {
           const decider = arguments[idx];
           const ui = (decider && decider.isRemote) ? remoteUI : localUI;
-          return ui[name].apply(ui, arguments);
+          const ret = ui[name].apply(ui, arguments);
+          // ★ 2v2 联机读秒：主机是唯一知道「现在在问谁」的一端，
+          //   在这里统一播报一次（本地问 / 远端问都过这条路）。
+          //   ★ 必须放在派发**之后**：远端 ask 会先推一份快照，座位帧跟着
+          //     快照走，客机据以判断「红框还是绿框」用的 current 才是新的。
+          try { localUI.noticeAsk(name, arguments, decider); } catch (e) {}
+          return ret;
         };
       });
     }
@@ -308,6 +314,12 @@
                   method + '】，按放弃处理。', 'warn');
               }
             } catch (e) {}
+            // ★ 这一问确实结束了（远端没应答）：收掉他的红色读秒框
+            const ui = self.session && self.session.ui;
+            if (ui && typeof ui.paintAskOwner === 'function' && ui._askOwner &&
+                Number(ui._askOwner.seat) === Number(self.remoteSeat)) {
+              try { ui.paintAskOwner(null); } catch (e) {}
+            }
             resolve(fallbackAct(method, args));
             return;
           }
@@ -322,6 +334,13 @@
       if (!rec) return;
       delete this.waiters[id];
       if (rec.timer) clearTimeout(rec.timer);
+      // ★ 2v2 读秒：远端这一问已经作答，立刻收掉他的红色描边
+      //   （否则要等下一问 / 下一回合才消失，看起来像还在读秒）
+      const ui = this.session && this.session.ui;
+      if (ui && typeof ui.paintAskOwner === 'function' && ui._askOwner &&
+          Number(ui._askOwner.seat) === Number(this.remoteSeat)) {
+        try { ui.paintAskOwner(null); } catch (e) {}
+      }
       const fn = rec.resolve || rec;
       if (typeof fn === 'function') fn(P.unpackAct(value, this.game));
     }
@@ -592,6 +611,8 @@
         case 'askAbort': this.onAskAbort(m); break;
         case 'act': this.onActFrame(m); break;
         case 'log': this.onLogFrame(m); break;
+        // ★ 2v2 读秒：谁正在被询问（房主下发，客机据此点亮红色描边）
+        case 'askOwner': this.onAskOwnerFrame(m); break;
         case 'fx': this.onFxFrame(m); break;
         case 'link': if (this.role === 'guest') this.onLink(m.info); break;
         case 'over': this.onOver(m); break;
@@ -603,6 +624,27 @@
     onLogFrame(m) {
       try { if (this.ui && typeof this.ui.log === 'function') this.ui.log(m.m, m.c); }
       catch (e) {}
+    }
+    /**
+     * ★ 2v2 读秒：房主下发「seat 正在被询问 / 在做什么 / 共几秒」，客机按座位
+     *   找到角色后点亮红框，并在其角色框下方走倒计时胶囊。
+     *   seat 为 null 表示这一问结束了，红框与胶囊一起收掉。
+     *   视图局里座位号与权威端一致。
+     */
+    onAskOwnerFrame(m) {
+      const ui = this.ui;
+      if (!ui || typeof ui.paintAskOwner !== 'function') return;
+      if (!m || m.seat == null) {
+        try { ui.paintAskOwner(null); } catch (e) {}
+        return;
+      }
+      const g = this.viewGame || this.game;
+      const seat = Number(m.seat);
+      const p = (!g || !g.players) ? null
+        : ((g.players.find((x) => x && Number(x.seat) === seat)) || null);
+      try {
+        ui.paintAskOwner(p, true, { label: m.label || '', secs: Number(m.secs) || 8 });
+      } catch (e) {}
     }
 
     /** 选将完成：把角色发给对端；两边齐了才开局 */
@@ -1011,6 +1053,12 @@
       if (id != null && this._askOpen.id !== id) return;
       this._clearAskWatch();
       this._askOpen = null;
+      // ★ 读秒红框随这一问一起收掉，否则会一直亮着
+      try {
+        if (this.ui && typeof this.ui.paintAskOwner === 'function') {
+          this.ui.paintAskOwner(null);
+        }
+      } catch (e) { /* 界面收起失败也不能堵住队列 */ }
       if (SGS.log) SGS.log('主机已放弃这一问，界面自动收起。', 'warn');
       try {
         if (this.ui && typeof this.ui.cancelPending === 'function') {

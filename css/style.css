@@ -251,6 +251,12 @@ body input, body textarea, body [contenteditable="true"] {
   border-color: #8fe0a0;
   box-shadow: 0 0 0 2px rgba(143,224,160,.45), 0 0 22px rgba(143,224,160,.4), 0 6px 18px rgba(0,0,0,.5);
 }
+/* ★ 2v2 联机读秒：正在被询问、但**不是**当前回合角色 → 与绿色 .acting 相对的柔和红框。
+   只在别人被问住时点亮，用来一眼看出「现在是谁在拖时间」。 */
+.hero-card.answering {
+  border-color: #cf8175;
+  box-shadow: 0 0 0 2px rgba(190,104,92,.40), 0 0 18px rgba(190,104,92,.32), 0 6px 18px rgba(0,0,0,.5);
+}
 /* ★ 铁索连环：横向锁链。不旋转角色框，只在框中央画一条金属链表示连环状态。 */
 .chain-mark {
   position: absolute;
@@ -673,6 +679,38 @@ body input, body textarea, body [contenteditable="true"] {
   position: absolute; bottom: 3px; left: 50%;
   transform: translateX(-50%);
   text-align: center;
+}
+
+/* ================= 其他角色框下方的读秒胶囊（2v2 联机） =================
+   读秒期间顶掉「N 号位」：同一条位置、同一行，改成「出牌·7s」这样的胶囊。
+   自己的读秒仍显示在引导文字后面（#hint 的 .ask-timer），这里不重复。 */
+.hero-card.timing .hero-seat-out { display: none !important; }
+.hero-timer {
+  position: absolute; top: calc(100% + 2px); left: 50%;
+  transform: translateX(-50%);
+  padding: 1px 8px 2px;
+  border-radius: 999px;
+  font-size: clamp(9px, 1.4vh, 12px);
+  font-weight: 700;
+  letter-spacing: .04em;
+  white-space: nowrap;
+  color: #2c1c0d;
+  background: linear-gradient(180deg, #f3dda6, #d9b76c);
+  border: 1px solid rgba(255,240,200,.55);
+  box-shadow: 0 2px 8px rgba(0,0,0,.55);
+  pointer-events: none;
+  z-index: 5;
+}
+.hero-timer:empty { display: none; }
+.hero-timer.urgent {
+  color: #2c120c;
+  background: linear-gradient(180deg, #f0a794, #d67a63);
+  border-color: rgba(255,206,190,.6);
+  animation: hero-timer-pulse .9s ease-in-out infinite;
+}
+@keyframes hero-timer-pulse {
+  0%, 100% { box-shadow: 0 2px 8px rgba(0,0,0,.55), 0 0 0 0 rgba(214,122,99,.5); }
+  50% { box-shadow: 0 2px 8px rgba(0,0,0,.55), 0 0 0 4px rgba(214,122,99,0); }
 }
 
 /* ================= 对手手牌数 =================
