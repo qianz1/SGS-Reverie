@@ -1279,7 +1279,162 @@
     setPhase() {}
 
     setHint(text) {
-      $('hint').textContent = text || '';
+      this._hintText = text || '';
+      this._paintHint();
+    }
+
+    /**
+     * ★ 重画顶部提示：读秒进行中时在文案后面追加一个「12s」徽标。
+     *   用 textContent + 独立 span，避免把提示文案当 HTML 解析。
+     */
+    _paintHint() {
+      if (typeof document === 'undefined' ||
+          typeof document.getElementById !== 'function') return;
+      const el = document.getElementById('hint');
+      if (!el) return;
+      const text = this._hintText || '';
+      const t = this._askTimer;
+      if (!t || !t.active || typeof document.createElement !== 'function') {
+        el.textContent = text;
+        return;
+      }
+      el.textContent = text ? text + '  ' : '';
+      const s = document.createElement('span');
+      s.className = 'ask-timer' + (t.left <= 3 ? ' urgent' : '');
+      s.textContent = t.left + 's';
+      el.appendChild(s);
+    }
+
+    /* ---------------- 2v2 联机读秒 ---------------- */
+
+    /**
+     * 读秒是否生效：**组队模式 + 联机对局**。
+     * 本地 2v2（三个 AI）与 1v1 都不启用，保持原来「想多久想多久」的手感；
+     * 联机时双方都是真人，没有读秒会互相干等（尤其 2v2 四个人）。
+     */
+    askTimerOn(game) {
+      const g = game || this.game;
+      if (!g || !g.teamMode) return false;
+      return !!(this._netHost || this._netView);
+    }
+
+    /** 各类交互的秒数：出牌阶段 12s（每用一张牌 / 一个技能都会重开一轮），其余 8s */
+    askSecondsFor(mode) {
+      return mode === 'play' ? 12 : 8;
+    }
+
+    /**
+     * ★ 让读秒状态与当前 pending 对齐，由 refreshActions() 每次进入时调用。
+     *   · pending 变了 →（重）开计时；同一问内刷新按钮不会重置秒数；
+     *   · pending 清空 → 停表。
+     *   出牌阶段的「用牌后重置」天然成立：用一张牌 → finish → 主循环再次
+     *   waitPlay 建一个新的 pending。
+     */
+    _syncAskTimer() {
+      const pd = this.pending;
+      const t = this._askTimer;
+      if (!pd) { this.clearAskTimer(); return; }
+      if (t && t.pending === pd) return;
+      this.clearAskTimer();
+      if (!this.askTimerOn(pd.game)) return;
+      const secs = this.askSecondsFor(pd.mode);
+      if (!secs) return;
+      this.startAskTimer(pd, secs);
+    }
+
+    startAskTimer(pd, seconds) {
+      const t = { pending: pd, left: seconds, total: seconds, active: true, timer: null };
+      this._askTimer = t;
+      this._paintHint();
+      t.timer = setInterval(() => {
+        if (!t.active) return;
+        t.left -= 1;
+        if (t.left <= 0) {
+          this.clearAskTimer();
+          this.onAskTimeout(pd);
+          return;
+        }
+        this._paintHint();
+      }, 1000);
+    }
+
+    clearAskTimer() {
+      const t = this._askTimer;
+      if (!t) return;
+      this._askTimer = null;
+      t.active = false;
+      if (t.timer) clearInterval(t.timer);
+      this._paintHint();
+    }
+
+    /**
+     * ★ 超时兜底：询问类「放弃」，目标类「随机选」，出牌阶段「直接结束」。
+     *   全部走 finish()，因此客机（_netView）也会照常把动作上送权威端。
+     */
+    onAskTimeout(pd) {
+      if (!pd || this.pending !== pd) return;   // 期间已被正常作答
+      const g = pd.game;
+      const pickOne = (arr) => (arr && arr.length)
+        ? arr[Math.floor(Math.random() * arr.length)] : null;
+      switch (pd.mode) {
+        case 'play':
+          this.finish({ type: 'end' });
+          return;
+        case 'target': {
+          const t = pickOne(pd.targets);
+          this.finish(t || null);
+          return;
+        }
+        case 'targets': {
+          // 借刀杀人：随机一名目标 + 其攻击范围内随机一名
+          const first = pickOne(pd.targets);
+          if (!first) { this.finish(null); return; }
+          const seconds = (g && typeof g.listTargets === 'function')
+            ? g.listTargets(first, { type: 'sha' }, 'sha') : [];
+          const second = pickOne(seconds);
+          this.finish(second ? [first, second] : null);
+          return;
+        }
+        case 'chainTargets': {
+          const pool = (pd.targets || []).slice();
+          const n = Math.max(pd.min || 1, Math.min(pd.max || 2, pool.length));
+          const picks = [];
+          while (picks.length < n && pool.length) {
+            picks.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
+          }
+          this.finish(picks.length >= (pd.min || 1) ? picks : null);
+          return;
+        }
+        case 'wugu': {
+          // 五谷必须拿一张：随机挑还没被拿走的
+          const s = this.wuguSession;
+          const avail = s ? s.cards.filter((c) => !s.taken[String(c.id)]) : [];
+          const c = pickOne(avail);
+          this.finish(c ? c.id : null);
+          return;
+        }
+        case 'peek': {
+          // 火计看手牌：随机展示一张
+          const c = pickOne(pd.cards);
+          this.finish(c ? c.id : null);
+          return;
+        }
+        case 'reveal':
+          this.finish([]);        // 亮牌可以一张都不拿
+          return;
+        case 'discard': {
+          // 弃牌阶段超时：按 AI 的价值排序自动弃，避免卡死
+          const ids = (g && g.ai && typeof g.ai.pickDiscards === 'function')
+            ? g.ai.pickDiscards(pd.player, pd.need) : [];
+          this.finish(ids);
+          return;
+        }
+        case 'optional':
+          this.finish(false);
+          return;
+        default:
+          this.finish(null);
+      }
     }
 
     hpHTML(p) {
@@ -3488,6 +3643,9 @@
 
     /** 根据 pending 状态刷新按钮区 */
     refreshActions() {
+      // ★ 读秒与 pending 对齐：所有 waitXxx 建完 pending 都会走到这里，
+      //   因此不需要在每个等待方法里各写一遍 startTimer。
+      this._syncAskTimer();
       const pd = this.pending;
       if (!pd) {
         // ★ 动画期间（摸牌 / 出牌飞牌 / 展示区让位）pending 已清空：

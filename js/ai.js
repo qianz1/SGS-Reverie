@@ -250,6 +250,12 @@
             type: 'huogong', name: '火攻'
           });
           if (!SGS.Tricks.canUse(g, player, asCard).ok) break;
+          // ★ 2v2：没有任何敌方合法目标时直接收手（敌人可能一手空牌）。
+          //   selectTarget 的兜底也会拦住，这里提前判断，免得白弹面板 / 白播动画。
+          if (g.teamMode) {
+            const ts = g.listTargets(player, asCard);
+            if (!ts.some((t) => this.isEnemy(player, t))) break;
+          }
           // ★ 火攻的后续结算要先「展示目标一张手牌」再「弃置一张同色手牌」
           //   才能造成伤害：发动后若手里一张牌都不剩，等于白扔一张素材。
           //   所以按「付掉素材后还剩几张手牌」判：素材来自手牌就减 1，
@@ -292,6 +298,30 @@
       return ids.length ? player.hand.find((c) => c.id === ids[0]) : null;
     }
 
+    /**
+     * ★【渐营】的「上一张使用的牌」：返回 {suit, rank}，没有该技能 /
+     *   本阶段还没出过牌 → null。用于出牌时的排序偏好。
+     */
+    jianyingKey(player) {
+      const sk = player && player.skill;
+      if (!sk || String(sk.titles || '').indexOf('渐营') < 0) return null;
+      const log = player.playLog;
+      if (!log || !log.length) return null;
+      const last = log[log.length - 1] || {};
+      const suit = last.suit || '';
+      const rank = last.rank ? String(last.rank) : '';
+      return (suit || rank) ? { suit: suit, rank: rank } : null;
+    }
+
+    /** 这张牌能否触发【渐营】（与上一张同花色或同点数） */
+    jianyingHit(player, card) {
+      const key = this.jianyingKey(player);
+      if (!key || !card) return false;
+      if (key.suit && card.suit === key.suit) return true;
+      if (key.rank && card.rank != null && String(card.rank) === key.rank) return true;
+      return false;
+    }
+
     /** 选一张此刻确实可用的锦囊（已过目标 / 距离校验） */
     pickTrick(game, player) {
       const priority = {
@@ -310,7 +340,13 @@
         .filter((c) => team || !(c.type === 'taoyuan' && player.hp >= player.maxHp))
         // ★ 2v2：按阵营筛掉「会亏队友」的锦囊
         .filter((c) => !team || this.trickWorthForTeam(game, player, c))
-        .sort((a, b) => (priority[a.type] ?? 9) - (priority[b.type] ?? 9));
+        // ★【渐营】：能接上「上一张牌」花色 / 点数的锦囊优先，先把摸牌链跑起来
+        .sort((a, b) => {
+          const ja = this.jianyingHit(player, a) ? 0 : 1;
+          const jb = this.jianyingHit(player, b) ? 0 : 1;
+          if (ja !== jb) return ja - jb;
+          return (priority[a.type] ?? 9) - (priority[b.type] ?? 9);
+        });
       return list.find((c) => SGS.Tricks.canUse(game, player, c).ok) || null;
     }
 
@@ -423,7 +459,11 @@
     /** 这张锦囊对目标是否「有害」（用于 2v2 的无懈决策） */
     harmfulTrick(card) {
       const list = ['wanjian', 'nanman', 'juedou', 'huogong', 'chubuyi',
-        'shunshou', 'guohe', 'lebusishu', 'bingliangcunduan', 'jiedaosharen'];
+        'shunshou', 'guohe', 'lebusishu', 'bingliangcunduan', 'jiedaosharen',
+        // ★ 铁索本身不掉血，但「被连住」等于把属性伤害放大到自己身上，
+        //   对目标方是明确的负面效果。缺了它，己方 AI（如神赵云）会把
+        //   「队友对敌方用的铁索」当成有益锦囊去【无懈可击】抵消 —— 帮了敌人。
+        'tiesuolianhuan'];
       return !!card && list.indexOf(card.type) >= 0;
     }
 
@@ -444,6 +484,14 @@
         const harmful = this.harmfulTrick(opts.card);
         const target = opts.target || opts.user;
         const mine = target ? this.isTeammate(player, target) : false;
+        // ★ 锦囊是队友打出的、且正在生效中：即使指向我方，也当配合处理，
+        //   不去抵消（【铁索连环】连自己人再传导伤害是常见配合）。
+        //   注意只在 negated=false 时跳过 —— 队友的牌被敌人无懈时，
+        //   仍然要按下面的逻辑出手把它救回来。
+        if (!opts.negated && opts.user && opts.user !== player &&
+            this.isTeammate(player, opts.user)) {
+          return null;
+        }
         const wantNegated = mine ? harmful : !harmful;
         if (!!opts.negated === wantNegated) return null;
       }
@@ -463,6 +511,13 @@
     async askChoice(player, opts) {
       // ★【渐营】等面板里被置灰的选项，AI 同样不能选
       const choices = ((opts && opts.choices) || []).filter((c) => !c.disabled);
+      // ★【涅槃】三选一：场上已有两名及以上敌人处于连环状态时选【火计】——
+      //   火攻是火焰伤害，一次能沿铁索传导给所有被连的敌人，收益最高。
+      if (opts && opts.name === '涅槃') {
+        const fire = choices.find((c) => c.value === '火计');
+        const chainedFoes = this.enemiesOf(player).filter((p) => p.chained).length;
+        if (fire && chainedFoes >= 2) return '火计';
+      }
       const discard = choices.find((c) => c.value === 'discard');
       const draw = choices.find((c) => c.value === 'draw');
       if (discard && player.hand.length > 2) return discard.value;
@@ -498,7 +553,13 @@
         .filter((c) => player.canUseAsSha(c))
         .filter((c) => targets.some((t) => this.shaLandsOn(player, t, c)));
       const score = (c) => (SGS.Cards.isSha(c.type) ? 0 : 1);
-      usable.sort((a, b) => score(a) - score(b));
+      // ★【渐营】：能接上上一张牌花色 / 点数的【杀】优先
+      usable.sort((a, b) => {
+        const ja = this.jianyingHit(player, a) ? 0 : 1;
+        const jb = this.jianyingHit(player, b) ? 0 : 1;
+        if (ja !== jb) return ja - jb;
+        return score(a) - score(b);
+      });
       return usable[0] || null;
     }
 
@@ -595,10 +656,21 @@
       //   会再问一次，白白多弃牌。
       const exempt = (c) => (typeof player.hook === 'function')
         ? !!player.hook('handLimitExempt', c) : false;
+      // ★ 能当【桃】用的牌 = 半条命，永远最后才弃。
+      //   典型是【龙魂】：♥ 可以当【桃】，旧版按「闪 / 杀」的普通价值排序，
+      //   手牌一多就把红桃闪、红桃杀先弃掉了，濒死时反而没牌自救。
+      const savesLife = (c) => {
+        if (!c) return false;
+        if (c.type === 'tao') return true;
+        return typeof player.canUseAsType === 'function' &&
+          !!player.canUseAsType(c, 'tao');
+      };
       const scored = player.hand.slice();
       scored.sort((a, b) => {
         const ea = exempt(a) ? 1 : 0, eb = exempt(b) ? 1 : 0;
         if (ea !== eb) return ea - eb;   // 非免计牌在前，优先弃它
+        const sa = savesLife(a) ? 1 : 0, sb = savesLife(b) ? 1 : 0;
+        if (sa !== sb) return sa - sb;   // 能当桃的排后面（最后才弃）
         return (rank[b.type] ?? 1) - (rank[a.type] ?? 1);
       });
       return scored.slice(0, n).map((c) => c.id);

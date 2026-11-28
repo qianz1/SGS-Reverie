@@ -287,6 +287,14 @@
         if (this.teamMode) {
           const foes = pool.filter((p) => !this.isTeammate(user, p));
           if (foes.length) pool = foes;
+          else if (this.ai && typeof this.ai.harmfulTrick === 'function' &&
+                   this.ai.harmfulTrick(card)) {
+            // ★ 2v2：有害单体锦囊（火攻 / 决斗 / 顺手 / 过河…）没有任何
+            //   敌方合法目标时宁可不用，也绝不回头打队友。
+            //   旧版这里会退回 others（含队友），于是「敌方阵亡一人后
+            //   诸葛亮用火攻烧队友」「敌人没手牌时火攻打自己人」。
+            return null;
+          }
         }
         pool = pool.slice().sort((a, b) =>
           (a.hp || 0) - (b.hp || 0) || (b.maxHp || 0) - (a.maxHp || 0));
@@ -369,12 +377,16 @@
           }
         } else if (targets.length) {
           if (this.teamMode) {
-            // ★ 2v2：只连敌人，绝不自连 / 连队友（属性伤害会溅到自己人）
-            const foes = targets.filter((p) => !this.isTeammate(user, p));
+            // ★ 2v2：只连敌人，绝不自连 / 连队友（属性伤害会溅到自己人）；
+            //   ★ 已处于连环状态的敌人不再重复指定 —— 再连一次没有任何收益，
+            //     只会浪费一张【铁索连环】和一次多目标名额。
+            const foes = targets.filter(
+              (p) => !this.isTeammate(user, p) && !p.chained);
             picks = foes.slice(0, max);
           } else {
-            const foe = targets.find((p) => p !== user);
-            picks = foe ? (targets.length > 1 ? [user, foe] : [foe]) : [user];
+            // ★ 1v1：敌方已经连环时同样不再浪费这张牌（返回 [] 让牌不消耗）
+            const foe = targets.find((p) => p !== user && !p.chained);
+            picks = foe ? [user, foe] : [];
           }
         }
         if (!picks || picks.length < min) return [];

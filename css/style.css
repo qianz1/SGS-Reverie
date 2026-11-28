@@ -873,6 +873,29 @@ body input, body textarea, body [contenteditable="true"] {
   pointer-events: none;
 }
 
+/* ★ 2v2 联机读秒：跟在提示文案后面的秒数徽标 */
+.hint .ask-timer {
+  display: inline-block;
+  min-width: 2.4em;
+  padding: 0 6px;
+  margin-left: 2px;
+  border-radius: 999px;
+  background: rgba(24, 18, 12, .78);
+  border: 1px solid rgba(240, 205, 130, .55);
+  color: #ffd98a;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .04em;
+}
+.hint .ask-timer.urgent {
+  color: #ff8f7a;
+  border-color: rgba(255, 120, 96, .8);
+  animation: ask-timer-blink .8s steps(2, end) infinite;
+}
+@keyframes ask-timer-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .45; }
+}
+
 /* ================= 牌局记录（左下浮层） ================= */
 .log-box {
   position: absolute;

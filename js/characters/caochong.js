@@ -265,8 +265,16 @@
       const equips = equipCards(player);
       if (!equips.length) return false;          // 没有装备牌，发动不了
 
-      // AI 只救自己人（1v1 里不会去救对手）；真人由玩家自己决定
-      if (!SGS.isDecider(player) && !!player.isHuman !== !!dying.isHuman) return false;
+      // AI 只救自己人；真人由玩家自己决定。
+      // ★ 必须按「阵营」判断：旧版用 isHuman 区分敌我，而 2v2 里四个 AI
+      //   的 isHuman 全是 false，于是条件恒不成立 —— 曹冲会翻面 + 弃装备
+      //   去救敌方角色，等于帮对手续命。
+      if (!SGS.isDecider(player)) {
+        const sameTeam = !!(game && game.teamMode &&
+          typeof game.isTeammate === 'function' &&
+          game.isTeammate(player, dying));
+        if (!sameTeam) return false;
+      }
 
       const ok = await game.askOptional(player, {
         name: '仁心',
